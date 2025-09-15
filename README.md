@@ -14,13 +14,12 @@ However, there is a large body of existing code that relies on the Servlet API. 
 * [`HttpServletRequest`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletRequest.html)
 * [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html)
 * [`HttpSession`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpSession.html)
-* [`HttpSessionContext`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpSessionContext.html)
 * [`ServletContext`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletServletContext.html)
 * [`ServletInputStream`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletServletInputStream.html)
 * [`ServletOutputStream`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletServletOutputStream.html)
 * [`ServletPrintWriter`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletServletPrintWriter.html)
 
-This library is for the legacy `jakarta.servlet` API. If you need to integrate with the legacy `javax.servlet` API, use [`soklet-servlet-javax`](https://github.com/soklet/soklet-servlet-javax).
+This library is for the `jakarta.servlet` API. If you need to integrate with the legacy `javax.servlet` API, use [`soklet-servlet-javax`](https://github.com/soklet/soklet-servlet-javax).
 
 This library has zero dependencies (not counting Soklet). Just add the JAR to your project and you're good to go. 
 

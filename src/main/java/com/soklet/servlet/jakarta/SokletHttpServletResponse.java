@@ -360,39 +360,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public void sendRedirect(@Nullable String location) throws IOException {
-		ensureResponseIsUncommitted();
-		setStatus(HttpServletResponse.SC_FOUND);
-
-		// This method can accept relative URLs; the servlet container must convert the relative URL to an absolute URL
-		// before sending the response to the client. If the location is relative without a leading '/' the container
-		// interprets it as relative to the current request URI. If the location is relative with a leading '/'
-		// the container interprets it as relative to the servlet container root. If the location is relative with two
-		// leading '/' the container interprets it as a network-path reference (see RFC 3986: Uniform Resource
-		// Identifier (URI): Generic Syntax, section 4.2 "Relative Reference").
-		String finalLocation;
-
-		if (location.startsWith("/")) {
-			// URL is relative with leading /
-			finalLocation = location;
-		} else {
-			try {
-				new URL(location);
-				// URL is absolute
-				finalLocation = location;
-			} catch (MalformedURLException ignored) {
-				// URL is relative but does not have leading '/', resolve against the parent of the current path
-				String base = getRequestPath();
-				int idx = base.lastIndexOf('/');
-				String parent = (idx <= 0) ? "/" : base.substring(0, idx);
-				finalLocation = parent.endsWith("/") ? parent + location : parent + "/" + location;
-			}
-		}
-
-		setRedirectUrl(finalLocation);
-		setHeader("Location", finalLocation);
-
-		flushBuffer();
-		setResponseCommitted(true);
+		doSendRedirect(location, HttpServletResponse.SC_FOUND, true);
 	}
 
 	@Override
@@ -900,5 +868,13 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Nullable
 	public Supplier<Map<String, String>> getTrailerFields() {
 		return this.trailerFieldsSupplier;
+	}
+
+	@Override
+	public void setCharacterEncoding(@Nullable Charset charset) {
+		if (charset == null)
+			setCharacterEncoding((String) null);
+		else
+			setCharacterEncoding(charset.name());
 	}
 }

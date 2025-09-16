@@ -33,6 +33,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
 import jakarta.servlet.http.HttpUpgradeHandler;
+import jakarta.servlet.http.MappingMatch;
 import jakarta.servlet.http.Part;
 
 import javax.annotation.Nonnull;
@@ -1051,38 +1052,117 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		return DispatcherType.REQUEST;
 	}
 
+	// *** Jakarta-specific below
+
+	@Nullable
+	private String requestId;
+	@Nullable
+	private ServletConnection servletConnection;
+
 	@Override
+	@Nonnull
 	public HttpServletMapping getHttpServletMapping() {
-		throw new UnsupportedOperationException("TODO");
+		// Soklet does not use Servlet mappings. Return a default mapping consistent with the container's default servlet handling ("/").
+		return new HttpServletMapping() {
+			@Override
+			@Nonnull
+			public String getMatchValue() {
+				return "";
+			} // empty for DEFAULT
+
+			@Override
+			@Nonnull
+			public String getPattern() {
+				return "/";
+			}
+
+			@Override
+			@Nonnull
+			public String getServletName() {
+				return "Soklet";
+			}
+
+			@Override
+			@Nonnull
+			public MappingMatch getMappingMatch() {
+				return MappingMatch.DEFAULT;
+			}
+		};
 	}
 
 	@Override
+	@Nonnull
 	public Map<String, String> getTrailerFields() {
-		throw new UnsupportedOperationException("TODO");
+		// Soklet requests are backed by an in-memory byte array and do not support protocol trailers.
+		return Map.of();
 	}
 
 	@Override
 	public boolean isTrailerFieldsReady() {
-		throw new UnsupportedOperationException("TODO");
+		// There will never be trailers to read for Soklet-backed requests.
+		return true;
 	}
 
 	@Override
-	public void setCharacterEncoding(Charset encoding) {
-		throw new UnsupportedOperationException("TODO");
+	public void setCharacterEncoding(@Nullable Charset encoding) {
+		// Prefer the new 6.1 overload. Behaves like setCharacterEncoding(String) but without checked exception.
+		setCharset(encoding);
 	}
 
 	@Override
+	@Nonnull
 	public String getRequestId() {
-		throw new UnsupportedOperationException("TODO");
+		if (this.requestId == null)
+			this.requestId = UUID.randomUUID().toString();
+
+		return this.requestId;
 	}
 
 	@Override
+	@Nonnull
 	public String getProtocolRequestId() {
-		throw new UnsupportedOperationException("TODO");
+		// Per Servlet 6.1 specification, for HTTP/1.x there is no protocol-defined request ID.
+		// Return the empty string in that case.
+		return "";
 	}
 
 	@Override
+	@Nonnull
 	public ServletConnection getServletConnection() {
-		throw new UnsupportedOperationException("TODO");
+		if (this.servletConnection == null) {
+			String protocol = getProtocol(); // e.g. "HTTP/1.1"
+			boolean secure = "https".equalsIgnoreCase(getScheme());
+			String alpn = protocol.toUpperCase(Locale.ROOT).startsWith("HTTP/1") ? "http/1.1" : "unknown";
+			String connectionId = UUID.randomUUID().toString();
+
+			this.servletConnection = new ServletConnection() {
+				@Override
+				@Nonnull
+				public String getConnectionId() {
+					return connectionId;
+				}
+
+				@Override
+				@Nonnull
+				public String getProtocol() {
+					return alpn;
+				}
+
+
+				@Override
+				@Nonnull
+				public String getProtocolConnectionId() {
+					// HTTP/1.x and HTTP/2 do not define a protocol connection ID per spec.
+					return "";
+				}
+
+				@Override
+				public boolean isSecure() {
+					return secure;
+				}
+			};
+		}
+
+		return this.servletConnection;
 	}
 }

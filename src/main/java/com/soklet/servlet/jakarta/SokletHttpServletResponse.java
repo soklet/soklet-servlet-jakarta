@@ -869,21 +869,24 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	@Override
-	public void sendRedirect(String location,
+	public void sendRedirect(@Nonnull String location,
 													 int statusCode) throws IOException {
+		requireNonNull(location);
 		doSendRedirect(location, statusCode, true);
 	}
 
 	@Override
-	public void sendRedirect(String location,
+	public void sendRedirect(@Nonnull String location,
 													 boolean clearBuffer) throws IOException {
+		requireNonNull(location);
 		doSendRedirect(location, HttpServletResponse.SC_FOUND, clearBuffer);
 	}
 
 	@Override
-	public void sendRedirect(String location,
+	public void sendRedirect(@Nonnull String location,
 													 int statusCode,
 													 boolean clearBuffer) throws IOException {
+		requireNonNull(location);
 		doSendRedirect(location, statusCode, clearBuffer);
 	}
 

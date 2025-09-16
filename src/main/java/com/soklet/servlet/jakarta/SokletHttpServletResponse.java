@@ -819,32 +819,83 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		return this.locale;
 	}
 
-	@Override
-	public void sendRedirect(String location,
-													 int sc) throws IOException {
-		throw new UnsupportedOperationException("TODO");
+	// *** Jakarta-specific below
+
+	@Nullable
+	private Supplier<Map<String, String>> trailerFieldsSupplier;
+
+	@Nonnull
+	protected String resolveRedirectLocation(@Nonnull String location) {
+		requireNonNull(location);
+
+		// This accepts relative URLs and converts them to a location String suitable for the Location header.
+		String finalLocation;
+
+		if (location.startsWith("/")) {
+			finalLocation = location;
+		} else {
+			try {
+				new URL(location); // absolute
+				finalLocation = location;
+			} catch (MalformedURLException ignored) {
+				String base = getRequestPath();
+				int idx = base.lastIndexOf('/');
+				String parent = (idx <= 0) ? "/" : base.substring(0, idx);
+				finalLocation = parent.endsWith("/") ? parent + location : parent + "/" + location;
+			}
+		}
+
+		return finalLocation;
+	}
+
+	protected void doSendRedirect(@Nonnull String location,
+																int statusCode,
+																boolean clearBuffer) throws IOException {
+		requireNonNull(location);
+
+		ensureResponseIsUncommitted();
+		setStatus(statusCode);
+
+		String finalLocation = resolveRedirectLocation(location);
+
+		setRedirectUrl(finalLocation);
+		setHeader("Location", finalLocation);
+
+		if (clearBuffer)
+			resetBuffer();
+
+		flushBuffer();
+		setResponseCommitted(true);
 	}
 
 	@Override
-	public void sendRedirect(String s,
-													 int i,
-													 boolean b) throws IOException {
-		throw new UnsupportedOperationException("TODO");
+	public void sendRedirect(String location,
+													 int statusCode) throws IOException {
+		doSendRedirect(location, statusCode, true);
 	}
 
 	@Override
 	public void sendRedirect(String location,
 													 boolean clearBuffer) throws IOException {
-		throw new UnsupportedOperationException("TODO");
+		doSendRedirect(location, HttpServletResponse.SC_FOUND, clearBuffer);
 	}
 
 	@Override
-	public void setTrailerFields(Supplier<Map<String, String>> supplier) {
-		throw new UnsupportedOperationException("TODO");
+	public void sendRedirect(String location,
+													 int statusCode,
+													 boolean clearBuffer) throws IOException {
+		doSendRedirect(location, statusCode, clearBuffer);
 	}
 
 	@Override
+	public void setTrailerFields(@Nullable Supplier<Map<String, String>> supplier) {
+		// Store the supplier; Soklet does not currently write HTTP trailers when sending the response body.
+		this.trailerFieldsSupplier = supplier;
+	}
+
+	@Override
+	@Nullable
 	public Supplier<Map<String, String>> getTrailerFields() {
-		throw new UnsupportedOperationException("TODO");
+		return this.trailerFieldsSupplier;
 	}
 }

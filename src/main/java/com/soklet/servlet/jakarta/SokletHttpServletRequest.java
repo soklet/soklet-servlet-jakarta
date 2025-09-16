@@ -1067,8 +1067,8 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 			@Override
 			@Nonnull
 			public String getMatchValue() {
-				return "";
-			} // empty for DEFAULT
+				return ""; // empty for DEFAULT
+			}
 
 			@Override
 			@Nonnull

@@ -16,12 +16,12 @@
 
 package com.soklet.servlet.jakarta;
 
-import com.soklet.core.MarshaledResponse;
+import com.soklet.MarshaledResponse;
+import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import jakarta.servlet.http.Cookie;
 
 /*
  * Verify cookies added via HttpServletResponse are emitted into Soklet MarshaledResponse cookies.
@@ -50,7 +50,7 @@ public class CookieMappingTests {
 						rc.getPath().orElse("").equals("/") &&
 						rc.getMaxAge().get().toSeconds() == 60L
 		);
-		
+
 		Assertions.assertTrue(any, "Cookie 'sid' does not have correct values in marshaled response");
 	}
 }

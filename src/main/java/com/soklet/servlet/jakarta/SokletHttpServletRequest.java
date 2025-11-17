@@ -16,8 +16,8 @@
 
 package com.soklet.servlet.jakarta;
 
-import com.soklet.core.Request;
-import com.soklet.core.Utilities;
+import com.soklet.Request;
+import com.soklet.Utilities;
 import jakarta.servlet.AsyncContext;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;

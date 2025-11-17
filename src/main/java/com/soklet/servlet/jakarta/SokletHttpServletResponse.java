@@ -16,10 +16,10 @@
 
 package com.soklet.servlet.jakarta;
 
-import com.soklet.core.MarshaledResponse;
-import com.soklet.core.Request;
-import com.soklet.core.Response;
-import com.soklet.core.ResponseCookie;
+import com.soklet.MarshaledResponse;
+import com.soklet.Request;
+import com.soklet.Response;
+import com.soklet.ResponseCookie;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletResponse;

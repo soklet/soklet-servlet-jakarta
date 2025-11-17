@@ -16,14 +16,14 @@
 
 package com.soklet.servlet.jakarta;
 
-import com.soklet.core.HttpMethod;
-import com.soklet.core.MarshaledResponse;
-import com.soklet.core.Request;
+import com.soklet.HttpMethod;
+import com.soklet.MarshaledResponse;
+import com.soklet.Request;
+import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Set;
 

@@ -16,13 +16,13 @@
 
 package com.soklet.servlet.jakarta;
 
-import com.soklet.core.HttpMethod;
-import com.soklet.core.Request;
+import com.soklet.HttpMethod;
+import com.soklet.Request;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * @author <a href="https://www.revetkn.com">Mark Allen</a>

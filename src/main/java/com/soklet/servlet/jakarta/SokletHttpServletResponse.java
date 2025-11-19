@@ -360,7 +360,39 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public void sendRedirect(@Nullable String location) throws IOException {
-		doSendRedirect(location, HttpServletResponse.SC_FOUND, true);
+		ensureResponseIsUncommitted();
+		setStatus(HttpServletResponse.SC_FOUND);
+
+		// This method can accept relative URLs; the servlet container must convert the relative URL to an absolute URL
+		// before sending the response to the client. If the location is relative without a leading '/' the container
+		// interprets it as relative to the current request URI. If the location is relative with a leading '/'
+		// the container interprets it as relative to the servlet container root. If the location is relative with two
+		// leading '/' the container interprets it as a network-path reference (see RFC 3986: Uniform Resource
+		// Identifier (URI): Generic Syntax, section 4.2 "Relative Reference").
+		String finalLocation;
+
+		if (location.startsWith("/")) {
+			// URL is relative with leading /
+			finalLocation = location;
+		} else {
+			try {
+				new URL(location);
+				// URL is absolute
+				finalLocation = location;
+			} catch (MalformedURLException ignored) {
+				// URL is relative but does not have leading '/', resolve against the parent of the current path
+				String base = getRequestPath();
+				int idx = base.lastIndexOf('/');
+				String parent = (idx <= 0) ? "/" : base.substring(0, idx);
+				finalLocation = parent.endsWith("/") ? parent + location : parent + "/" + location;
+			}
+		}
+
+		setRedirectUrl(finalLocation);
+		setHeader("Location", finalLocation);
+
+		flushBuffer();
+		setResponseCommitted(true);
 	}
 
 	@Override
@@ -473,10 +505,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (currentResponseWriteMethod == ResponseWriteMethod.UNSPECIFIED) {
 			setResponseWriteMethod(ResponseWriteMethod.SERVLET_OUTPUT_STREAM);
 			this.servletOutputStream = SokletServletOutputStream.withOutputStream(getResponseOutputStream())
-					.writeOccurredCallback((ignored) -> {
+					.onWriteOccurred((ignored1, ignored2) -> {
 						// Flip to "committed" if any write occurs
 						setResponseCommitted(true);
-					}).writeFinalizedCallback((ignored) -> {
+					}).onWriteFinalized((ignored) -> {
 						setResponseFinalized(true);
 					}).build();
 			return getServletOutputStream().get();
@@ -586,8 +618,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			this.printWriter =
 					SokletServletPrintWriter.withWriter(
 									new OutputStreamWriter(getResponseOutputStream(), enc))
-							.writeOccurredCallback((ignored) -> setResponseCommitted(true))   // commit on first write
-							.writeFinalizedCallback((ignored) -> setResponseFinalized(true))
+							.onWriteOccurred((ignored1, ignored2) -> setResponseCommitted(true))   // commit on first write
+							.onWriteFinalized((ignored) -> setResponseFinalized(true))
 							.build();
 
 			return getPrintWriter().get();

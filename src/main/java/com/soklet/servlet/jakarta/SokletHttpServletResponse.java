@@ -178,99 +178,99 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	@Nonnull
-	protected String getRequestPath() {
+	private String getRequestPath() {
 		return this.requestPath;
 	}
 
 	@Nonnull
-	protected List<Cookie> getCookies() {
+	private List<Cookie> getCookies() {
 		return this.cookies;
 	}
 
 	@Nonnull
-	protected Map<String, List<String>> getHeaders() {
+	private Map<String, List<String>> getHeaders() {
 		return this.headers;
 	}
 
 	@Nonnull
-	protected Integer getStatusCode() {
+	private Integer getStatusCode() {
 		return this.statusCode;
 	}
 
-	protected void setStatusCode(@Nonnull Integer statusCode) {
+	private void setStatusCode(@Nonnull Integer statusCode) {
 		requireNonNull(statusCode);
 		this.statusCode = statusCode;
 	}
 
 	@Nonnull
-	protected Optional<String> getErrorMessage() {
+	private Optional<String> getErrorMessage() {
 		return Optional.ofNullable(this.errorMessage);
 	}
 
-	protected void setErrorMessage(@Nullable String errorMessage) {
+	private void setErrorMessage(@Nullable String errorMessage) {
 		this.errorMessage = errorMessage;
 	}
 
 	@Nonnull
-	protected Optional<String> getRedirectUrl() {
+	private Optional<String> getRedirectUrl() {
 		return Optional.ofNullable(this.redirectUrl);
 	}
 
-	protected void setRedirectUrl(@Nullable String redirectUrl) {
+	private void setRedirectUrl(@Nullable String redirectUrl) {
 		this.redirectUrl = redirectUrl;
 	}
 
 	@Nonnull
-	protected Optional<Charset> getCharset() {
+	private Optional<Charset> getCharset() {
 		return Optional.ofNullable(this.charset);
 	}
 
-	protected void setCharset(@Nullable Charset charset) {
+	private void setCharset(@Nullable Charset charset) {
 		this.charset = charset;
 	}
 
 	@Nonnull
-	protected Boolean getResponseCommitted() {
+	private Boolean getResponseCommitted() {
 		return this.responseCommitted;
 	}
 
-	protected void setResponseCommitted(@Nonnull Boolean responseCommitted) {
+	private void setResponseCommitted(@Nonnull Boolean responseCommitted) {
 		requireNonNull(responseCommitted);
 		this.responseCommitted = responseCommitted;
 	}
 
 	@Nonnull
-	protected Boolean getResponseFinalized() {
+	private Boolean getResponseFinalized() {
 		return this.responseFinalized;
 	}
 
-	protected void setResponseFinalized(@Nonnull Boolean responseFinalized) {
+	private void setResponseFinalized(@Nonnull Boolean responseFinalized) {
 		requireNonNull(responseFinalized);
 		this.responseFinalized = responseFinalized;
 	}
 
-	protected void ensureResponseIsUncommitted() {
+	private void ensureResponseIsUncommitted() {
 		if (getResponseCommitted())
 			throw new IllegalStateException("Response has already been committed.");
 	}
 
 	@Nonnull
-	protected String dateHeaderRepresentation(@Nonnull Long millisSinceEpoch) {
+	private String dateHeaderRepresentation(@Nonnull Long millisSinceEpoch) {
 		requireNonNull(millisSinceEpoch);
 		return DATE_TIME_FORMATTER.format(Instant.ofEpochMilli(millisSinceEpoch));
 	}
 
 	@Nonnull
-	protected Optional<SokletServletOutputStream> getServletOutputStream() {
+	private Optional<SokletServletOutputStream> getServletOutputStream() {
 		return Optional.ofNullable(this.servletOutputStream);
 	}
 
-	protected void setServletOutputStream(@Nullable SokletServletOutputStream servletOutputStream) {
+	private void setServletOutputStream(@Nullable SokletServletOutputStream servletOutputStream) {
 		this.servletOutputStream = servletOutputStream;
 	}
 
 	@Nonnull
-	protected Optional<SokletServletPrintWriter> getPrintWriter() {
+	private Optional<SokletServletPrintWriter> getPrintWriter() {
 		return Optional.ofNullable(this.printWriter);
 	}
 
@@ -279,36 +279,36 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	@Nonnull
-	protected ByteArrayOutputStream getResponseOutputStream() {
+	private ByteArrayOutputStream getResponseOutputStream() {
 		return this.responseOutputStream;
 	}
 
-	protected void setResponseOutputStream(@Nonnull ByteArrayOutputStream responseOutputStream) {
+	private void setResponseOutputStream(@Nonnull ByteArrayOutputStream responseOutputStream) {
 		requireNonNull(responseOutputStream);
 		this.responseOutputStream = responseOutputStream;
 	}
 
 	@Nonnull
-	protected Integer getResponseBufferSizeInBytes() {
+	private Integer getResponseBufferSizeInBytes() {
 		return this.responseBufferSizeInBytes;
 	}
 
-	protected void setResponseBufferSizeInBytes(@Nonnull Integer responseBufferSizeInBytes) {
+	private void setResponseBufferSizeInBytes(@Nonnull Integer responseBufferSizeInBytes) {
 		requireNonNull(responseBufferSizeInBytes);
 		this.responseBufferSizeInBytes = responseBufferSizeInBytes;
 	}
 
 	@Nonnull
-	protected ResponseWriteMethod getResponseWriteMethod() {
+	private ResponseWriteMethod getResponseWriteMethod() {
 		return this.responseWriteMethod;
 	}
 
-	protected void setResponseWriteMethod(@Nonnull ResponseWriteMethod responseWriteMethod) {
+	private void setResponseWriteMethod(@Nonnull ResponseWriteMethod responseWriteMethod) {
 		requireNonNull(responseWriteMethod);
 		this.responseWriteMethod = responseWriteMethod;
 	}
 
-	protected enum ResponseWriteMethod {
+	private enum ResponseWriteMethod {
 		UNSPECIFIED,
 		SERVLET_OUTPUT_STREAM,
 		PRINT_WRITER
@@ -521,12 +521,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	@Nonnull
-	protected Boolean writerObtained() {
+	private Boolean writerObtained() {
 		return getResponseWriteMethod() == ResponseWriteMethod.PRINT_WRITER;
 	}
 
 	@Nonnull
-	protected Optional<String> extractCharsetFromContentType(@Nullable String type) {
+	private Optional<String> extractCharsetFromContentType(@Nullable String type) {
 		if (type == null)
 			return Optional.empty();
 
@@ -549,7 +549,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	// Helper: remove any charset=... from Content-Type (preserve other params)
 	@Nonnull
-	protected Optional<String> stripCharsetParam(@Nullable String type) {
+	private Optional<String> stripCharsetParam(@Nullable String type) {
 		if (type == null)
 			return Optional.empty();
 
@@ -569,7 +569,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	// Helper: ensure Content-Type includes the given charset (replacing any existing one)
 	@Nonnull
-	protected Optional<String> withCharset(@Nullable String type,
+	private Optional<String> withCharset(@Nullable String type,
 																				 @Nonnull String charsetName) {
 		requireNonNull(charsetName);
 
@@ -825,7 +825,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	private Supplier<Map<String, String>> trailerFieldsSupplier;
 
 	@Nonnull
-	protected String resolveRedirectLocation(@Nonnull String location) {
+	private String resolveRedirectLocation(@Nonnull String location) {
 		requireNonNull(location);
 
 		// This accepts relative URLs and converts them to a location String suitable for the Location header.
@@ -848,7 +848,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		return finalLocation;
 	}
 
-	protected void doSendRedirect(@Nonnull String location,
+	private void doSendRedirect(@Nonnull String location,
 																int statusCode,
 																boolean clearBuffer) throws IOException {
 		requireNonNull(location);

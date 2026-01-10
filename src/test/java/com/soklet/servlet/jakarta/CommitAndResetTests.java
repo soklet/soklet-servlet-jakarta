@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ import java.io.PrintWriter;
 public class CommitAndResetTests {
 	@Test
 	public void writingCommitsResponseAndResetBufferAfterCommitThrows() throws Exception {
-		SokletHttpServletResponse response = SokletHttpServletResponse.withRequestPath("/p");
+		SokletHttpServletResponse response = SokletHttpServletResponse.fromRawPath("/p", SokletServletContext.fromDefaults());
 		PrintWriter pw = response.getWriter();
 		pw.print("hello");
 		pw.flush();
@@ -46,7 +46,7 @@ public class CommitAndResetTests {
 
 	@Test
 	public void resetAllowsSwitchingWriters() throws Exception {
-		SokletHttpServletResponse response = SokletHttpServletResponse.withRequestPath("/p");
+		SokletHttpServletResponse response = SokletHttpServletResponse.fromRawPath("/p", SokletServletContext.fromDefaults());
 		response.getWriter(); // select writer
 		response.reset();     // reset clears write method
 		response.getOutputStream(); // now allowed

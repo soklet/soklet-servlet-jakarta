@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.util.Collection;
 
 /*
  * Verify cookies added via HttpServletResponse are emitted into Soklet MarshaledResponse cookies.
@@ -32,7 +33,7 @@ import javax.annotation.concurrent.ThreadSafe;
 public class CookieMappingTests {
 	@Test
 	public void responseCookiesAppearInMarshaledResponse() throws Exception {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		Cookie c = new Cookie("sid", "abc123");
 		c.setHttpOnly(true);
 		c.setSecure(true);
@@ -52,5 +53,26 @@ public class CookieMappingTests {
 		);
 
 		Assertions.assertTrue(any, "Cookie 'sid' does not have correct values in marshaled response");
+	}
+
+	@Test
+	public void setCookieHeadersExposeAddedCookies() {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+
+		Cookie first = new Cookie("a", "1");
+		first.setPath("/");
+		Cookie second = new Cookie("b", "2");
+
+		resp.addCookie(first);
+		resp.addCookie(second);
+
+		Assertions.assertTrue(resp.containsHeader("Set-Cookie"));
+		Assertions.assertNotNull(resp.getHeader("Set-Cookie"));
+
+		Collection<String> values = resp.getHeaders("Set-Cookie");
+		Assertions.assertEquals(2, values.size());
+		Assertions.assertTrue(values.stream().anyMatch(value -> value.startsWith("a=1")));
+		Assertions.assertTrue(values.stream().anyMatch(value -> value.startsWith("b=2")));
+		Assertions.assertTrue(resp.getHeaderNames().stream().anyMatch(name -> "Set-Cookie".equalsIgnoreCase(name)));
 	}
 }

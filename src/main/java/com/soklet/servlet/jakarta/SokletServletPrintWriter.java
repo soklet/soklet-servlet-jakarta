@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,9 +26,9 @@ import com.soklet.servlet.jakarta.SokletServletPrintWriterEvent.PrintfPerformed;
 import com.soklet.servlet.jakarta.SokletServletPrintWriterEvent.StringWritten;
 import com.soklet.servlet.jakarta.SokletServletPrintWriterEvent.ValuePrinted;
 import com.soklet.servlet.jakarta.SokletServletPrintWriterEvent.ValueWithNewlinePrinted;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.PrintWriter;
 import java.io.Writer;
@@ -45,19 +45,25 @@ import static java.util.Objects.requireNonNull;
  */
 @NotThreadSafe
 public final class SokletServletPrintWriter extends PrintWriter {
-	@Nonnull
-	private final BiConsumer<SokletServletPrintWriter, SokletServletPrintWriterEvent> onWriteOccurred;
-	@Nonnull
-	private final Consumer<SokletServletPrintWriter> onWriteFinalized;
-	@Nonnull
+	@NonNull
+	private final BiConsumer<@NonNull SokletServletPrintWriter, @NonNull SokletServletPrintWriterEvent> onWriteOccurred;
+	@NonNull
+	private final Consumer<@NonNull SokletServletPrintWriter> onWriteFinalized;
+	@NonNull
 	private Boolean writeFinalized = false;
 
-	@Nonnull
-	public static Builder withWriter(@Nonnull Writer writer) {
+	@NonNull
+	public static SokletServletPrintWriter fromWriter(@NonNull Writer writer) {
+		requireNonNull(writer);
+		return withWriter(writer).build();
+	}
+
+	@NonNull
+	public static Builder withWriter(@NonNull Writer writer) {
 		return new Builder(writer);
 	}
 
-	private SokletServletPrintWriter(@Nonnull Builder builder) {
+	private SokletServletPrintWriter(@NonNull Builder builder) {
 		super(requireNonNull(builder.writer), true);
 		this.onWriteOccurred = builder.onWriteOccurred != null ? builder.onWriteOccurred : (ignored1, ignored2) -> {};
 		this.onWriteFinalized = builder.onWriteFinalized != null ? builder.onWriteFinalized : (ignored) -> {};
@@ -72,224 +78,229 @@ public final class SokletServletPrintWriter extends PrintWriter {
 	 */
 	@NotThreadSafe
 	public static class Builder {
-		@Nonnull
+		@NonNull
 		private Writer writer;
 		@Nullable
-		private BiConsumer<SokletServletPrintWriter, SokletServletPrintWriterEvent> onWriteOccurred;
+		private BiConsumer<@NonNull SokletServletPrintWriter, @NonNull SokletServletPrintWriterEvent> onWriteOccurred;
 		@Nullable
-		private Consumer<SokletServletPrintWriter> onWriteFinalized;
+		private Consumer<@NonNull SokletServletPrintWriter> onWriteFinalized;
 
-		@Nonnull
-		private Builder(@Nonnull Writer writer) {
+		@NonNull
+		private Builder(@NonNull Writer writer) {
 			requireNonNull(writer);
 			this.writer = writer;
 		}
 
-		@Nonnull
-		public Builder writer(@Nonnull Writer writer) {
+		@NonNull
+		public Builder writer(@NonNull Writer writer) {
 			requireNonNull(writer);
 			this.writer = writer;
 			return this;
 		}
 
-		@Nonnull
-		public Builder onWriteOccurred(@Nullable BiConsumer<SokletServletPrintWriter, SokletServletPrintWriterEvent> onWriteOccurred) {
+		@NonNull
+		public Builder onWriteOccurred(
+				@Nullable BiConsumer<@NonNull SokletServletPrintWriter, @NonNull SokletServletPrintWriterEvent> onWriteOccurred) {
 			this.onWriteOccurred = onWriteOccurred;
 			return this;
 		}
 
-		@Nonnull
-		public Builder onWriteFinalized(@Nullable Consumer<SokletServletPrintWriter> onWriteFinalized) {
+		@NonNull
+		public Builder onWriteFinalized(@Nullable Consumer<@NonNull SokletServletPrintWriter> onWriteFinalized) {
 			this.onWriteFinalized = onWriteFinalized;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public SokletServletPrintWriter build() {
 			return new SokletServletPrintWriter(this);
 		}
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean getWriteFinalized() {
 		return this.writeFinalized;
 	}
 
-	private void setWriteFinalized(@Nonnull Boolean writeFinalized) {
+	private void setWriteFinalized(@NonNull Boolean writeFinalized) {
 		requireNonNull(writeFinalized);
 		this.writeFinalized = writeFinalized;
 	}
 
-	@Nonnull
-	private BiConsumer<SokletServletPrintWriter, SokletServletPrintWriterEvent> getOnWriteOccurred() {
+	@NonNull
+	private BiConsumer<@NonNull SokletServletPrintWriter, @NonNull SokletServletPrintWriterEvent> getOnWriteOccurred() {
 		return this.onWriteOccurred;
 	}
 
-	@Nonnull
-	private Consumer<SokletServletPrintWriter> getOnWriteFinalized() {
+	@NonNull
+	private Consumer<@NonNull SokletServletPrintWriter> getOnWriteFinalized() {
 		return this.onWriteFinalized;
+	}
+
+	private void flushOutput() {
+		super.flush();
 	}
 
 // Implementation of PrintWriter methods below:
 
 	@Override
-	public void write(@Nonnull char[] buf,
+	public void write(@NonNull char[] buf,
 										int off,
 										int len) {
 		requireNonNull(buf);
 
 		super.write(buf, off, len);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharsWritten(buf, off, len));
 	}
 
 	@Override
-	public void write(@Nonnull String s,
+	public void write(@NonNull String s,
 										int off,
 										int len) {
 		requireNonNull(s);
 
 		super.write(s, off, len);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new StringWritten(s, off, len));
 	}
 
 	@Override
 	public void write(int c) {
 		super.write(c);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharWritten(c));
 	}
 
 	@Override
-	public void write(@Nonnull char[] buf) {
+	public void write(@NonNull char[] buf) {
 		requireNonNull(buf);
 
 		super.write(buf);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharsWritten(buf, 0, buf.length));
 	}
 
 	@Override
-	public void write(@Nonnull String s) {
+	public void write(@NonNull String s) {
 		requireNonNull(s);
 
 		super.write(s);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new StringWritten(s, 0, s.length()));
 	}
 
 	@Override
 	public void print(boolean b) {
 		super.print(b);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(b));
 	}
 
 	@Override
 	public void print(char c) {
 		super.print(c);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(c));
 	}
 
 	@Override
 	public void print(int i) {
 		super.print(i);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(i));
 	}
 
 	@Override
 	public void print(long l) {
 		super.print(l);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(l));
 	}
 
 	@Override
 	public void print(float f) {
 		super.print(f);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(f));
 	}
 
 	@Override
 	public void print(double d) {
 		super.print(d);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(d));
 	}
 
 	@Override
-	public void print(@Nonnull char[] s) {
+	public void print(@NonNull char[] s) {
 		requireNonNull(s);
 
 		super.print(s);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(s));
 	}
 
 	@Override
 	public void print(@Nullable String s) {
 		super.print(s);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(s));
 	}
 
 	@Override
 	public void print(@Nullable Object obj) {
 		super.print(obj);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new ValuePrinted(obj));
 	}
 
 	@Override
 	public void println() {
 		super.println();
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new NewlinePrinted());
 	}
 
 	@Override
 	public void println(boolean x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(char x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(int x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(long x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(float x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(double x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
@@ -298,98 +309,96 @@ public final class SokletServletPrintWriter extends PrintWriter {
 		requireNonNull(x);
 
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(@Nullable String x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
 	public void println(@Nullable Object x) {
 		super.println(x);
-		super.flush();
+		flush();
 		getOnWriteOccurred().accept(this, new ValueWithNewlinePrinted(x));
 	}
 
 	@Override
-	@Nonnull
-	public PrintWriter printf(@Nonnull String format,
-														@Nullable Object... args) {
+	@NonNull
+	public PrintWriter printf(@NonNull String format,
+														@Nullable Object @Nullable ... args) {
 		requireNonNull(format);
 
-		PrintWriter printWriter = super.printf(format, args);
-		super.flush();
-
-		Object[] normalizedArgs = args != null ? args : new Object[0];
+		@Nullable Object @NonNull [] normalizedArgs = args != null ? args : new Object[0];
+		PrintWriter printWriter = super.printf(format, normalizedArgs);
+		flush();
 		getOnWriteOccurred().accept(this, new PrintfPerformed(null, format, normalizedArgs));
 
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public PrintWriter printf(@Nullable Locale l,
-														@Nonnull String format,
-														@Nullable Object... args) {
+														@NonNull String format,
+														@Nullable Object @Nullable ... args) {
 		requireNonNull(format);
 
-		PrintWriter printWriter = super.printf(l, format, args);
-		super.flush();
-		getOnWriteOccurred().accept(this, new PrintfPerformed(l, format, args));
+		@Nullable Object @NonNull [] normalizedArgs = args != null ? args : new Object[0];
+		PrintWriter printWriter = super.printf(l, format, normalizedArgs);
+		flush();
+		getOnWriteOccurred().accept(this, new PrintfPerformed(l, format, normalizedArgs));
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
-	public PrintWriter format(@Nonnull String format,
-														@Nullable Object... args) {
+	@NonNull
+	public PrintWriter format(@NonNull String format,
+														@Nullable Object @Nullable ... args) {
 		requireNonNull(format);
 
-		PrintWriter printWriter = super.format(format, args);
-		super.flush();
-
-		Object[] normalizedArgs = args != null ? args : new Object[0];
+		@Nullable Object @NonNull [] normalizedArgs = args != null ? args : new Object[0];
+		PrintWriter printWriter = super.format(format, normalizedArgs);
+		flush();
 		getOnWriteOccurred().accept(this, new FormatPerformed(null, format, normalizedArgs));
 
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public PrintWriter format(@Nullable Locale l,
-														@Nonnull String format,
-														@Nullable Object... args) {
+														@NonNull String format,
+														@Nullable Object @Nullable ... args) {
 		requireNonNull(format);
 
-		PrintWriter printWriter = super.format(l, format, args);
-		super.flush();
-
-		Object[] normalizedArgs = args != null ? args : new Object[0];
+		@Nullable Object @NonNull [] normalizedArgs = args != null ? args : new Object[0];
+		PrintWriter printWriter = super.format(l, format, normalizedArgs);
+		flush();
 		getOnWriteOccurred().accept(this, new FormatPerformed(l, format, normalizedArgs));
 
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public PrintWriter append(@Nullable CharSequence csq) {
 		// JDK does this, we mirror it
 		if (csq == null)
 			csq = "null";
 
 		PrintWriter printWriter = super.append(csq);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharSequenceAppended(csq, 0, csq.length()));
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public PrintWriter append(@Nullable CharSequence csq,
 														int start,
 														int end) {
@@ -398,16 +407,16 @@ public final class SokletServletPrintWriter extends PrintWriter {
 			csq = "null";
 
 		PrintWriter printWriter = super.append(csq, start, end);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharSequenceAppended(csq, start, end));
 		return printWriter;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public PrintWriter append(char c) {
 		PrintWriter printWriter = super.append(c);
-		super.flush();
+		flushOutput();
 		getOnWriteOccurred().accept(this, new CharAppended(c));
 		return printWriter;
 	}

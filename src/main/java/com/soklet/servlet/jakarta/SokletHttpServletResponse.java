@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,21 +20,27 @@ import com.soklet.MarshaledResponse;
 import com.soklet.Request;
 import com.soklet.Response;
 import com.soklet.ResponseCookie;
+import com.soklet.StatusCode;
+import jakarta.servlet.ServletContext;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
-import java.net.MalformedURLException;
-import java.net.URL;
+import java.net.IDN;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.UnsupportedCharsetException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -42,14 +48,14 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static java.lang.String.format;
@@ -62,11 +68,11 @@ import static java.util.Objects.requireNonNull;
  */
 @NotThreadSafe
 public final class SokletHttpServletResponse implements HttpServletResponse {
-	@Nonnull
+	@NonNull
 	private static final Integer DEFAULT_RESPONSE_BUFFER_SIZE_IN_BYTES;
-	@Nonnull
+	@NonNull
 	private static final Charset DEFAULT_CHARSET;
-	@Nonnull
+	@NonNull
 	private static final DateTimeFormatter DATE_TIME_FORMATTER;
 
 	static {
@@ -77,21 +83,25 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 				.withZone(ZoneId.of("GMT"));
 	}
 
-	@Nonnull
-	private final String requestPath; // e.g. "/test/abc".  Always starts with "/"
-	@Nonnull
-	private final List<Cookie> cookies;
-	@Nonnull
-	private final Map<String, List<String>> headers;
-	@Nonnull
+	@NonNull
+	private final String rawPath; // Raw path (no query), e.g. "/test/abc" or "*"
+	@Nullable
+	private final HttpServletRequest httpServletRequest;
+	@NonNull
+	private final ServletContext servletContext;
+	@NonNull
+	private final List<@NonNull Cookie> cookies;
+	@NonNull
+	private final Map<@NonNull String, @NonNull List<@NonNull String>> headers;
+	@NonNull
 	private ByteArrayOutputStream responseOutputStream;
-	@Nonnull
+	@NonNull
 	private ResponseWriteMethod responseWriteMethod;
-	@Nonnull
+	@NonNull
 	private Integer statusCode;
-	@Nonnull
+	@NonNull
 	private Boolean responseCommitted;
-	@Nonnull
+	@NonNull
 	private Boolean responseFinalized;
 	@Nullable
 	private Locale locale;
@@ -103,29 +113,61 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	private Charset charset;
 	@Nullable
 	private String contentType;
-	@Nonnull
+	@NonNull
 	private Integer responseBufferSizeInBytes;
 	@Nullable
 	private SokletServletOutputStream servletOutputStream;
 	@Nullable
 	private SokletServletPrintWriter printWriter;
 
-	@Nonnull
-	public static SokletHttpServletResponse withRequest(@Nonnull Request request) {
+	@NonNull
+	public static SokletHttpServletResponse fromRequest(@NonNull HttpServletRequest request) {
 		requireNonNull(request);
-		return new SokletHttpServletResponse(request.getPath());
+		String rawPath = request.getRequestURI();
+		if (rawPath == null || rawPath.isEmpty())
+			rawPath = "/";
+		ServletContext servletContext = requireNonNull(request.getServletContext());
+		return new SokletHttpServletResponse(request, rawPath, servletContext);
 	}
 
-	@Nonnull
-	public static SokletHttpServletResponse withRequestPath(@Nonnull String requestPath) {
-		requireNonNull(requestPath);
-		return new SokletHttpServletResponse(requestPath);
+	@NonNull
+	public static SokletHttpServletResponse fromRequest(@NonNull Request request,
+																											@NonNull ServletContext servletContext) {
+		requireNonNull(request);
+		requireNonNull(servletContext);
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request)
+				.servletContext(servletContext)
+				.build();
+		return fromRequest(httpServletRequest);
 	}
 
-	private SokletHttpServletResponse(@Nonnull String requestPath) {
-		requireNonNull(requestPath);
+	/**
+	 * Creates a response bound to Soklet's raw path construct.
+	 * <p>
+	 * This is the exact path component sent by the client, without URL decoding and without a query string
+	 * (for example, {@code "/a%20b/c"}). It corresponds to {@link Request#getRawPath()}.
+	 *
+	 * @param rawPath        raw path component of the request (no query string)
+	 * @param servletContext servlet context for this response
+	 * @return a response bound to the raw request path
+	 */
+	@NonNull
+	public static SokletHttpServletResponse fromRawPath(@NonNull String rawPath,
+																											@NonNull ServletContext servletContext) {
+		requireNonNull(rawPath);
+		requireNonNull(servletContext);
+		return new SokletHttpServletResponse(null, rawPath, servletContext);
+	}
 
-		this.requestPath = requestPath;
+	private SokletHttpServletResponse(@Nullable HttpServletRequest httpServletRequest,
+																		@NonNull String rawPath,
+																		@NonNull ServletContext servletContext) {
+		requireNonNull(rawPath);
+		requireNonNull(servletContext);
+
+		this.httpServletRequest = httpServletRequest;
+		this.rawPath = rawPath;
+		this.servletContext = servletContext;
 		this.statusCode = HttpServletResponse.SC_OK;
 		this.responseWriteMethod = ResponseWriteMethod.UNSPECIFIED;
 		this.responseBufferSizeInBytes = DEFAULT_RESPONSE_BUFFER_SIZE_IN_BYTES;
@@ -136,7 +178,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.responseFinalized = false;
 	}
 
-	@Nonnull
+	@NonNull
 	public Response toResponse() {
 		// In the servlet world, there is really no difference between Response and MarshaledResponse
 		MarshaledResponse marshaledResponse = toMarshaledResponse();
@@ -148,14 +190,22 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 				.build();
 	}
 
-	@Nonnull
+	@NonNull
 	public MarshaledResponse toMarshaledResponse() {
 		byte[] body = getResponseOutputStream().toByteArray();
 
-		Map<String, Set<String>> headers = getHeaders().entrySet().stream()
-				.collect(Collectors.toMap(entry -> entry.getKey(), entry -> new HashSet<>(entry.getValue())));
+		Map<@NonNull String, @NonNull Set<@NonNull String>> headers = getHeaders().entrySet().stream()
+				.collect(Collectors.toMap(
+						Map.Entry::getKey,
+						entry -> new LinkedHashSet<>(entry.getValue()),
+						(left, right) -> {
+							left.addAll(right);
+							return left;
+						},
+						LinkedHashMap::new
+				));
 
-		Set<ResponseCookie> cookies = getCookies().stream()
+		Set<@NonNull ResponseCookie> cookies = getCookies().stream()
 				.map(cookie -> {
 					ResponseCookie.Builder builder = ResponseCookie.with(cookie.getName(), cookie.getValue())
 							.path(cookie.getPath())
@@ -177,32 +227,86 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 				.build();
 	}
 
-	@Nonnull
-	private String getRequestPath() {
-		return this.requestPath;
+	@NonNull
+	private String getRawPath() {
+		return this.rawPath;
 	}
 
-	@Nonnull
-	private List<Cookie> getCookies() {
+	@NonNull
+	private Optional<HttpServletRequest> getHttpServletRequest() {
+		return Optional.ofNullable(this.httpServletRequest);
+	}
+
+	@NonNull
+	private ServletContext getServletContext() {
+		return this.servletContext;
+	}
+
+	@NonNull
+	private List<@NonNull Cookie> getCookies() {
 		return this.cookies;
 	}
 
-	@Nonnull
-	private Map<String, List<String>> getHeaders() {
+	@NonNull
+	private Map<@NonNull String, @NonNull List<@NonNull String>> getHeaders() {
 		return this.headers;
 	}
 
-	@Nonnull
+	@NonNull
+	private List<@NonNull String> getSetCookieHeaderValues() {
+		if (getCookies().isEmpty())
+			return List.of();
+
+		List<@NonNull String> values = new ArrayList<>(getCookies().size());
+
+		for (Cookie cookie : getCookies())
+			values.add(toSetCookieHeaderValue(cookie));
+
+		return values;
+	}
+
+	@NonNull
+	private String toSetCookieHeaderValue(@NonNull Cookie cookie) {
+		requireNonNull(cookie);
+
+		ResponseCookie.Builder builder = ResponseCookie.with(cookie.getName(), cookie.getValue())
+				.path(cookie.getPath())
+				.secure(cookie.getSecure())
+				.httpOnly(cookie.isHttpOnly())
+				.domain(cookie.getDomain());
+
+		if (cookie.getMaxAge() >= 0)
+			builder.maxAge(Duration.ofSeconds(cookie.getMaxAge()));
+
+		return builder.build().toSetCookieHeaderRepresentation();
+	}
+
+	private void putHeaderValue(@NonNull String name,
+															@NonNull String value,
+															boolean replace) {
+		requireNonNull(name);
+		requireNonNull(value);
+
+		if (replace) {
+			List<@NonNull String> values = new ArrayList<>();
+			values.add(value);
+			getHeaders().put(name, values);
+		} else {
+			getHeaders().computeIfAbsent(name, k -> new ArrayList<>()).add(value);
+		}
+	}
+
+	@NonNull
 	private Integer getStatusCode() {
 		return this.statusCode;
 	}
 
-	private void setStatusCode(@Nonnull Integer statusCode) {
+	private void setStatusCode(@NonNull Integer statusCode) {
 		requireNonNull(statusCode);
 		this.statusCode = statusCode;
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<String> getErrorMessage() {
 		return Optional.ofNullable(this.errorMessage);
 	}
@@ -211,7 +315,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.errorMessage = errorMessage;
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<String> getRedirectUrl() {
 		return Optional.ofNullable(this.redirectUrl);
 	}
@@ -220,33 +324,88 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.redirectUrl = redirectUrl;
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<Charset> getCharset() {
 		return Optional.ofNullable(this.charset);
+	}
+
+	@Nullable
+	private Charset getContextResponseCharset() {
+		String encoding = getServletContext().getResponseCharacterEncoding();
+
+		if (encoding == null || encoding.isBlank())
+			return null;
+
+		try {
+			return Charset.forName(encoding);
+		} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+			return null;
+		}
+	}
+
+	@NonNull
+	private Charset getEffectiveCharset() {
+		Charset explicit = this.charset;
+
+		if (explicit != null)
+			return explicit;
+
+		Charset context = getContextResponseCharset();
+		return context == null ? DEFAULT_CHARSET : context;
 	}
 
 	private void setCharset(@Nullable Charset charset) {
 		this.charset = charset;
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean getResponseCommitted() {
 		return this.responseCommitted;
 	}
 
-	private void setResponseCommitted(@Nonnull Boolean responseCommitted) {
+	private void setResponseCommitted(@NonNull Boolean responseCommitted) {
 		requireNonNull(responseCommitted);
 		this.responseCommitted = responseCommitted;
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean getResponseFinalized() {
 		return this.responseFinalized;
 	}
 
-	private void setResponseFinalized(@Nonnull Boolean responseFinalized) {
+	private void setResponseFinalized(@NonNull Boolean responseFinalized) {
 		requireNonNull(responseFinalized);
 		this.responseFinalized = responseFinalized;
+	}
+
+	private void writeDefaultErrorBody(int statusCode,
+																		 @Nullable String message) {
+		if (getResponseOutputStream().size() > 0)
+			return;
+
+		String payload = message;
+
+		if (payload == null || payload.isBlank())
+			payload = StatusCode.fromStatusCode(statusCode)
+					.map(StatusCode::getReasonPhrase)
+					.orElse("Error");
+
+		if (payload.isBlank())
+			return;
+
+		Charset charset = getEffectiveCharset();
+		byte[] bytes = payload.getBytes(charset);
+		getResponseOutputStream().write(bytes, 0, bytes.length);
+
+		String currentContentType = getContentType();
+
+		if (currentContentType == null || currentContentType.isBlank())
+			setContentType("text/plain; charset=" + charset.name());
+	}
+
+	private void maybeCommitOnWrite() {
+		if (!getResponseCommitted() && getResponseOutputStream().size() >= getResponseBufferSizeInBytes())
+			setResponseCommitted(true);
 	}
 
 	private void ensureResponseIsUncommitted() {
@@ -254,13 +413,13 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			throw new IllegalStateException("Response has already been committed.");
 	}
 
-	@Nonnull
-	private String dateHeaderRepresentation(@Nonnull Long millisSinceEpoch) {
+	@NonNull
+	private String dateHeaderRepresentation(@NonNull Long millisSinceEpoch) {
 		requireNonNull(millisSinceEpoch);
 		return DATE_TIME_FORMATTER.format(Instant.ofEpochMilli(millisSinceEpoch));
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<SokletServletOutputStream> getServletOutputStream() {
 		return Optional.ofNullable(this.servletOutputStream);
 	}
@@ -269,7 +428,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.servletOutputStream = servletOutputStream;
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<SokletServletPrintWriter> getPrintWriter() {
 		return Optional.ofNullable(this.printWriter);
 	}
@@ -278,32 +437,32 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.printWriter = printWriter;
 	}
 
-	@Nonnull
+	@NonNull
 	private ByteArrayOutputStream getResponseOutputStream() {
 		return this.responseOutputStream;
 	}
 
-	private void setResponseOutputStream(@Nonnull ByteArrayOutputStream responseOutputStream) {
+	private void setResponseOutputStream(@NonNull ByteArrayOutputStream responseOutputStream) {
 		requireNonNull(responseOutputStream);
 		this.responseOutputStream = responseOutputStream;
 	}
 
-	@Nonnull
+	@NonNull
 	private Integer getResponseBufferSizeInBytes() {
 		return this.responseBufferSizeInBytes;
 	}
 
-	private void setResponseBufferSizeInBytes(@Nonnull Integer responseBufferSizeInBytes) {
+	private void setResponseBufferSizeInBytes(@NonNull Integer responseBufferSizeInBytes) {
 		requireNonNull(responseBufferSizeInBytes);
 		this.responseBufferSizeInBytes = responseBufferSizeInBytes;
 	}
 
-	@Nonnull
+	@NonNull
 	private ResponseWriteMethod getResponseWriteMethod() {
 		return this.responseWriteMethod;
 	}
 
-	private void setResponseWriteMethod(@Nonnull ResponseWriteMethod responseWriteMethod) {
+	private void setResponseWriteMethod(@NonNull ResponseWriteMethod responseWriteMethod) {
 		requireNonNull(responseWriteMethod);
 		this.responseWriteMethod = responseWriteMethod;
 	}
@@ -318,7 +477,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public void addCookie(@Nullable Cookie cookie) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
 
 		if (cookie != null)
 			getCookies().add(cookie);
@@ -326,6 +486,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public boolean containsHeader(@Nullable String name) {
+		if (name == null)
+			return false;
+
+		if ("Set-Cookie".equalsIgnoreCase(name))
+			return !getCookies().isEmpty() || getHeaders().containsKey(name);
+
 		return getHeaders().containsKey(name);
 	}
 
@@ -345,23 +511,541 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	public void sendError(int sc,
 												@Nullable String msg) throws IOException {
 		ensureResponseIsUncommitted();
+		resetBuffer();
 		setStatus(sc);
 		setErrorMessage(msg);
+		writeDefaultErrorBody(sc, msg);
 		setResponseCommitted(true);
 	}
 
 	@Override
 	public void sendError(int sc) throws IOException {
 		ensureResponseIsUncommitted();
+		resetBuffer();
 		setStatus(sc);
 		setErrorMessage(null);
+		writeDefaultErrorBody(sc, null);
 		setResponseCommitted(true);
+	}
+
+	@NonNull
+	private String getRedirectBaseUrl() {
+		HttpServletRequest httpServletRequest = getHttpServletRequest().orElse(null);
+
+		if (httpServletRequest == null)
+			return "http://localhost";
+
+		String scheme = httpServletRequest.getScheme();
+		if (scheme == null || scheme.isBlank())
+			scheme = "http";
+		String host = httpServletRequest.getServerName();
+		if (host == null || host.isBlank())
+			host = "localhost";
+		host = normalizeHostForLocation(host);
+		int port = httpServletRequest.getServerPort();
+		boolean defaultPort = port <= 0 || ("https".equalsIgnoreCase(scheme) && port == 443) || ("http".equalsIgnoreCase(scheme) && port == 80);
+		String authorityHost = host;
+
+		if (host != null && host.indexOf(':') >= 0 && !host.startsWith("[") && !host.endsWith("]"))
+			authorityHost = "[" + host + "]";
+
+		String authority = defaultPort ? authorityHost : format("%s:%d", authorityHost, port);
+		validateAuthority(scheme, authority);
+		return format("%s://%s", scheme, authority);
+	}
+
+	@Nullable
+	private String getRawQuery() {
+		HttpServletRequest httpServletRequest = getHttpServletRequest().orElse(null);
+
+		if (httpServletRequest == null)
+			return null;
+
+		String rawQuery = httpServletRequest.getQueryString();
+		return rawQuery == null || rawQuery.isEmpty() ? null : rawQuery;
+	}
+
+	private static final class ParsedLocation {
+		@Nullable
+		private final String scheme;
+		@Nullable
+		private final String rawAuthority;
+		@NonNull
+		private final String rawPath;
+		@Nullable
+		private final String rawQuery;
+		@Nullable
+		private final String rawFragment;
+		private final boolean opaque;
+
+		private ParsedLocation(@Nullable String scheme,
+													 @Nullable String rawAuthority,
+													 @NonNull String rawPath,
+													 @Nullable String rawQuery,
+													 @Nullable String rawFragment,
+													 boolean opaque) {
+			this.scheme = scheme;
+			this.rawAuthority = rawAuthority;
+			this.rawPath = rawPath;
+			this.rawQuery = rawQuery;
+			this.rawFragment = rawFragment;
+			this.opaque = opaque;
+		}
+	}
+
+	private static final class ParsedPath {
+		@NonNull
+		private final String rawPath;
+		@Nullable
+		private final String rawQuery;
+		@Nullable
+		private final String rawFragment;
+
+		private ParsedPath(@NonNull String rawPath,
+											 @Nullable String rawQuery,
+											 @Nullable String rawFragment) {
+			this.rawPath = rawPath;
+			this.rawQuery = rawQuery;
+			this.rawFragment = rawFragment;
+		}
+	}
+
+	@NonNull
+	private ParsedPath parsePathAndSuffix(@NonNull String rawPath) {
+		String path = rawPath;
+		String rawQuery = null;
+		String rawFragment = null;
+
+		int hash = path.indexOf('#');
+		if (hash >= 0) {
+			rawFragment = path.substring(hash + 1);
+			path = path.substring(0, hash);
+		}
+
+		int question = path.indexOf('?');
+		if (question >= 0) {
+			rawQuery = path.substring(question + 1);
+			path = path.substring(0, question);
+		}
+
+		return new ParsedPath(path, rawQuery, rawFragment);
+	}
+
+	private boolean isAsciiAlpha(char c) {
+		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+	}
+
+	private boolean isAsciiDigit(char c) {
+		return c >= '0' && c <= '9';
+	}
+
+	private boolean isSchemeChar(char c) {
+		return isAsciiAlpha(c) || isAsciiDigit(c) || c == '+' || c == '-' || c == '.';
+	}
+
+	private boolean isValidScheme(@NonNull String scheme) {
+		if (scheme.isEmpty())
+			return false;
+
+		if (!isAsciiAlpha(scheme.charAt(0)))
+			return false;
+
+		for (int i = 1; i < scheme.length(); i++) {
+			if (!isSchemeChar(scheme.charAt(i)))
+				return false;
+		}
+
+		return true;
+	}
+
+	private boolean containsNonAscii(@NonNull String value) {
+		for (int i = 0; i < value.length(); i++) {
+			if (value.charAt(i) > 0x7F)
+				return true;
+		}
+
+		return false;
+	}
+
+	@NonNull
+	private String normalizeHostForLocation(@NonNull String host) {
+		requireNonNull(host);
+		String normalized = host.trim();
+
+		if (normalized.isEmpty())
+			throw new IllegalArgumentException("Redirect host is invalid");
+
+		if (normalized.startsWith("[") && normalized.endsWith("]"))
+			return normalized;
+
+		if (normalized.indexOf(':') >= 0)
+			return normalized;
+
+		if (containsNonAscii(normalized)) {
+			try {
+				normalized = IDN.toASCII(normalized);
+			} catch (IllegalArgumentException e) {
+				throw new IllegalArgumentException("Redirect host is invalid", e);
+			}
+		}
+
+		return normalized;
+	}
+
+	private int countColons(@NonNull String value) {
+		int count = 0;
+
+		for (int i = 0; i < value.length(); i++) {
+			if (value.charAt(i) == ':')
+				count++;
+		}
+
+		return count;
+	}
+
+	@Nullable
+	private String normalizeAuthority(@NonNull String scheme,
+																		@Nullable String rawAuthority) {
+		requireNonNull(scheme);
+
+		if (rawAuthority == null || rawAuthority.isBlank())
+			return null;
+
+		String authority = rawAuthority.trim();
+		String userInfo = null;
+		String hostPort = authority;
+		int at = authority.lastIndexOf('@');
+
+		if (at >= 0) {
+			userInfo = authority.substring(0, at);
+			hostPort = authority.substring(at + 1);
+		}
+
+		String normalizedHostPort;
+
+		if (hostPort.startsWith("[")) {
+			int close = hostPort.indexOf(']');
+			if (close < 0)
+				throw new IllegalArgumentException("Redirect location is invalid");
+
+			normalizedHostPort = hostPort;
+		} else {
+			int colonCount = countColons(hostPort);
+			String host = hostPort;
+			String port = null;
+
+			if (colonCount > 1) {
+				host = hostPort;
+			} else if (colonCount == 1) {
+				int colon = hostPort.lastIndexOf(':');
+
+				if (colon <= 0 || colon == hostPort.length() - 1)
+					throw new IllegalArgumentException("Redirect location is invalid");
+
+				String portCandidate = hostPort.substring(colon + 1);
+				boolean allDigits = true;
+
+				for (int i = 0; i < portCandidate.length(); i++) {
+					if (!isAsciiDigit(portCandidate.charAt(i))) {
+						allDigits = false;
+						break;
+					}
+				}
+
+				if (!allDigits)
+					throw new IllegalArgumentException("Redirect location is invalid");
+
+				host = hostPort.substring(0, colon);
+				port = portCandidate;
+			}
+
+			String normalizedHost = normalizeHostForLocation(host);
+
+			if (normalizedHost.indexOf(':') >= 0 && !normalizedHost.startsWith("["))
+				normalizedHost = "[" + normalizedHost + "]";
+
+			normalizedHostPort = port == null ? normalizedHost : normalizedHost + ":" + port;
+		}
+
+		String normalized = userInfo == null ? normalizedHostPort : userInfo + "@" + normalizedHostPort;
+		validateAuthority(scheme, normalized);
+		return normalized;
+	}
+
+	private void validateAuthority(@NonNull String scheme,
+																 @Nullable String authority) {
+		requireNonNull(scheme);
+
+		try {
+			new URI(scheme, authority, null, null, null);
+		} catch (URISyntaxException e) {
+			throw new IllegalArgumentException("Redirect location is invalid", e);
+		}
+	}
+
+	private boolean isUnreserved(char c) {
+		return isAsciiAlpha(c) || isAsciiDigit(c) || c == '-' || c == '.' || c == '_' || c == '~';
+	}
+
+	private boolean isSubDelim(char c) {
+		return c == '!' || c == '$' || c == '&' || c == '\'' || c == '(' || c == ')'
+				|| c == '*' || c == '+' || c == ',' || c == ';' || c == '=';
+	}
+
+	private boolean isPchar(char c) {
+		return isUnreserved(c) || isSubDelim(c) || c == ':' || c == '@';
+	}
+
+	private boolean isAllowedInPath(char c) {
+		return isPchar(c) || c == '/';
+	}
+
+	private boolean isAllowedInQueryOrFragment(char c) {
+		return isPchar(c) || c == '/' || c == '?';
+	}
+
+	private boolean isHexDigit(char c) {
+		return (c >= '0' && c <= '9')
+				|| (c >= 'A' && c <= 'F')
+				|| (c >= 'a' && c <= 'f');
+	}
+
+	@NonNull
+	private String encodePreservingEscapes(@NonNull String input,
+																				 boolean allowQueryOrFragmentChars) {
+		requireNonNull(input);
+
+		StringBuilder out = new StringBuilder(input.length());
+		int length = input.length();
+
+		for (int i = 0; i < length; ) {
+			char c = input.charAt(i);
+
+			if (c == '%' && i + 2 < length
+					&& isHexDigit(input.charAt(i + 1)) && isHexDigit(input.charAt(i + 2))) {
+				out.append('%').append(input.charAt(i + 1)).append(input.charAt(i + 2));
+				i += 3;
+				continue;
+			}
+
+			boolean allowed = allowQueryOrFragmentChars ? isAllowedInQueryOrFragment(c) : isAllowedInPath(c);
+
+			if (allowed) {
+				out.append(c);
+				i++;
+				continue;
+			}
+
+			int codePoint = input.codePointAt(i);
+			byte[] bytes = new String(Character.toChars(codePoint)).getBytes(StandardCharsets.UTF_8);
+
+			for (byte b : bytes) {
+				out.append('%');
+				int v = b & 0xFF;
+				out.append(Character.toUpperCase(Character.forDigit((v >> 4) & 0xF, 16)));
+				out.append(Character.toUpperCase(Character.forDigit(v & 0xF, 16)));
+			}
+
+			i += Character.charCount(codePoint);
+		}
+
+		return out.toString();
+	}
+
+	private int firstDelimiterIndex(@NonNull String value) {
+		int slash = value.indexOf('/');
+		int question = value.indexOf('?');
+		int hash = value.indexOf('#');
+		int index = -1;
+
+		if (slash >= 0)
+			index = slash;
+		if (question >= 0 && (index == -1 || question < index))
+			index = question;
+		if (hash >= 0 && (index == -1 || hash < index))
+			index = hash;
+
+		return index;
+	}
+
+	@Nullable
+	private ParsedLocation parseLocationFallback(@NonNull String location) {
+		int colon = location.indexOf(':');
+		if (colon <= 0)
+			return null;
+
+		String scheme = location.substring(0, colon);
+		if (!isValidScheme(scheme))
+			return null;
+
+		String rest = location.substring(colon + 1);
+
+		if (rest.startsWith("//")) {
+			String authorityAndPath = rest.substring(2);
+			int delimiterIndex = firstDelimiterIndex(authorityAndPath);
+			String rawAuthority = delimiterIndex == -1 ? authorityAndPath : authorityAndPath.substring(0, delimiterIndex);
+			String remainder = delimiterIndex == -1 ? "" : authorityAndPath.substring(delimiterIndex);
+			ParsedPath parsedPath = parsePathAndSuffix(remainder);
+			return new ParsedLocation(scheme, rawAuthority.isEmpty() ? null : rawAuthority,
+					parsedPath.rawPath, parsedPath.rawQuery, parsedPath.rawFragment, false);
+		}
+
+		if (rest.startsWith("/")) {
+			ParsedPath parsedPath = parsePathAndSuffix(rest);
+			return new ParsedLocation(scheme, null, parsedPath.rawPath, parsedPath.rawQuery, parsedPath.rawFragment, false);
+		}
+
+		return new ParsedLocation(scheme, null, rest, null, null, true);
+	}
+
+	@NonNull
+	private ParsedLocation parseLocation(@NonNull String location) {
+		requireNonNull(location);
+
+		try {
+			URI uri = URI.create(location);
+			String rawPath = uri.getRawPath() == null ? "" : uri.getRawPath();
+			return new ParsedLocation(uri.getScheme(), uri.getRawAuthority(), rawPath, uri.getRawQuery(), uri.getRawFragment(), uri.isOpaque());
+		} catch (Exception ignored) {
+			ParsedLocation fallback = parseLocationFallback(location);
+			if (fallback != null)
+				return fallback;
+
+			ParsedPath parsedPath = parsePathAndSuffix(location);
+			return new ParsedLocation(null, null, parsedPath.rawPath, parsedPath.rawQuery, parsedPath.rawFragment, false);
+		}
+	}
+
+	@NonNull
+	private String normalizePath(@NonNull String path) {
+		requireNonNull(path);
+
+		if (path.isEmpty())
+			return path;
+
+		String input = path;
+		StringBuilder output = new StringBuilder();
+
+		while (!input.isEmpty()) {
+			if (input.startsWith("../")) {
+				input = input.substring(3);
+			} else if (input.startsWith("./")) {
+				input = input.substring(2);
+			} else if (input.startsWith("/./")) {
+				input = input.substring(2);
+			} else if (input.equals("/.")) {
+				input = "/";
+			} else if (input.startsWith("/../")) {
+				input = input.substring(3);
+				removeLastSegment(output);
+			} else if (input.equals("/..")) {
+				input = "/";
+				removeLastSegment(output);
+			} else if (input.equals(".") || input.equals("..")) {
+				input = "";
+			} else {
+				int start = input.startsWith("/") ? 1 : 0;
+				int nextSlash = input.indexOf('/', start);
+
+				if (nextSlash == -1) {
+					output.append(input);
+					input = "";
+				} else {
+					output.append(input, 0, nextSlash);
+					input = input.substring(nextSlash);
+				}
+			}
+		}
+
+		return output.toString();
+	}
+
+	private void removeLastSegment(@NonNull StringBuilder output) {
+		requireNonNull(output);
+
+		int length = output.length();
+
+		if (length == 0)
+			return;
+
+		int end = length;
+
+		if (end > 0 && output.charAt(end - 1) == '/')
+			end--;
+
+		if (end <= 0) {
+			output.setLength(0);
+			return;
+		}
+
+		int lastSlash = output.lastIndexOf("/", end - 1);
+
+		if (lastSlash >= 0)
+			output.delete(lastSlash, output.length());
+		else
+			output.setLength(0);
+	}
+
+	@NonNull
+	private String buildAbsoluteLocation(@NonNull String scheme,
+																			 @Nullable String rawAuthority,
+																			 @NonNull String rawPath,
+																			 @Nullable String rawQuery,
+																			 @Nullable String rawFragment) {
+		requireNonNull(scheme);
+		requireNonNull(rawPath);
+
+		String encodedPath = encodePreservingEscapes(rawPath, false);
+		String encodedQuery = rawQuery == null ? null : encodePreservingEscapes(rawQuery, true);
+		String encodedFragment = rawFragment == null ? null : encodePreservingEscapes(rawFragment, true);
+
+		StringBuilder out = new StringBuilder();
+		out.append(scheme).append(':');
+
+		if (rawAuthority != null) {
+			out.append("//").append(rawAuthority);
+		}
+
+		out.append(encodedPath);
+
+		if (encodedQuery != null)
+			out.append('?').append(encodedQuery);
+
+		if (encodedFragment != null)
+			out.append('#').append(encodedFragment);
+
+		return out.toString();
+	}
+
+	@NonNull
+	private String buildOpaqueLocation(@NonNull String location) {
+		requireNonNull(location);
+
+		try {
+			return URI.create(location).toASCIIString();
+		} catch (Exception e) {
+			throw new IllegalArgumentException("Redirect location is invalid", e);
+		}
 	}
 
 	@Override
 	public void sendRedirect(@Nullable String location) throws IOException {
+		sendRedirect(location, HttpServletResponse.SC_FOUND, true);
+	}
+
+	@Override
+	public void sendRedirect(@Nullable String location,
+													 int sc,
+													 boolean clearBuffer) throws IOException {
 		ensureResponseIsUncommitted();
-		setStatus(HttpServletResponse.SC_FOUND);
+
+		if (location == null)
+			throw new IllegalArgumentException("Redirect location must not be null");
+
+		setStatus(sc);
+
+		if (clearBuffer)
+			resetBuffer();
 
 		// This method can accept relative URLs; the servlet container must convert the relative URL to an absolute URL
 		// before sending the response to the client. If the location is relative without a leading '/' the container
@@ -369,22 +1053,50 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		// the container interprets it as relative to the servlet container root. If the location is relative with two
 		// leading '/' the container interprets it as a network-path reference (see RFC 3986: Uniform Resource
 		// Identifier (URI): Generic Syntax, section 4.2 "Relative Reference").
+		String baseUrl = getRedirectBaseUrl();
+		URI baseUri = URI.create(baseUrl);
+		String scheme = baseUri.getScheme();
+		String baseAuthority = baseUri.getRawAuthority();
 		String finalLocation;
+		ParsedLocation parsed = parseLocation(location);
 
-		if (location.startsWith("/")) {
+		if (parsed.opaque) {
+			finalLocation = buildOpaqueLocation(location);
+		} else if (location.startsWith("//")) {
+			// Network-path reference: keep host from location but inherit scheme
+			String normalizedAuthority = normalizeAuthority(scheme, parsed.rawAuthority);
+
+			if (normalizedAuthority == null || normalizedAuthority.isBlank())
+				throw new IllegalArgumentException("Redirect location is invalid");
+
+			String normalized = normalizePath(parsed.rawPath);
+			finalLocation = buildAbsoluteLocation(scheme, normalizedAuthority, normalized, parsed.rawQuery, parsed.rawFragment);
+		} else if (parsed.scheme != null) {
+			// URL is already absolute
+			String normalizedAuthority = normalizeAuthority(parsed.scheme, parsed.rawAuthority);
+			finalLocation = buildAbsoluteLocation(parsed.scheme, normalizedAuthority, parsed.rawPath, parsed.rawQuery, parsed.rawFragment);
+		} else if (location.startsWith("/")) {
 			// URL is relative with leading /
-			finalLocation = location;
+			String normalized = normalizePath(parsed.rawPath);
+			finalLocation = buildAbsoluteLocation(scheme, baseAuthority, normalized, parsed.rawQuery, parsed.rawFragment);
 		} else {
-			try {
-				new URL(location);
-				// URL is absolute
-				finalLocation = location;
-			} catch (MalformedURLException ignored) {
-				// URL is relative but does not have leading '/', resolve against the parent of the current path
-				String base = getRequestPath();
+			// URL is relative but does not have leading '/', resolve against the parent of the current path
+			String base = getRawPath();
+			String path = parsed.rawPath;
+			String query = parsed.rawQuery;
+
+			if (path.isEmpty() && query == null)
+				query = getRawQuery();
+
+			if (path.isEmpty()) {
+				String normalized = normalizePath(base);
+				finalLocation = buildAbsoluteLocation(scheme, baseAuthority, normalized, query, parsed.rawFragment);
+			} else {
 				int idx = base.lastIndexOf('/');
 				String parent = (idx <= 0) ? "/" : base.substring(0, idx);
-				finalLocation = parent.endsWith("/") ? parent + location : parent + "/" + location;
+				String resolvedPath = parent.endsWith("/") ? parent + path : parent + "/" + path;
+				String normalized = normalizePath(resolvedPath);
+				finalLocation = buildAbsoluteLocation(scheme, baseAuthority, normalized, query, parsed.rawFragment);
 			}
 		}
 
@@ -398,55 +1110,70 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Override
 	public void setDateHeader(@Nullable String name,
 														long date) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		setHeader(name, dateHeaderRepresentation(date));
 	}
 
 	@Override
 	public void addDateHeader(@Nullable String name,
 														long date) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		addHeader(name, dateHeaderRepresentation(date));
 	}
 
 	@Override
 	public void setHeader(@Nullable String name,
 												@Nullable String value) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
 
 		if (name != null && !name.isBlank() && value != null) {
-			List<String> values = new ArrayList<>();
-			values.add(value);
-			getHeaders().put(name, values);
+			if ("Content-Type".equalsIgnoreCase(name)) {
+				setContentType(value);
+				return;
+			}
+
+			putHeaderValue(name, value, true);
 		}
 	}
 
 	@Override
 	public void addHeader(@Nullable String name,
 												@Nullable String value) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
 
-		if (name != null && !name.isBlank() && value != null)
-			getHeaders().computeIfAbsent(name, k -> new ArrayList<>()).add(value);
+		if (name != null && !name.isBlank() && value != null) {
+			if ("Content-Type".equalsIgnoreCase(name)) {
+				setContentType(value);
+				return;
+			}
+
+			putHeaderValue(name, value, false);
+		}
 	}
 
 	@Override
 	public void setIntHeader(@Nullable String name,
 													 int value) {
-		ensureResponseIsUncommitted();
 		setHeader(name, String.valueOf(value));
 	}
 
 	@Override
 	public void addIntHeader(@Nullable String name,
 													 int value) {
-		ensureResponseIsUncommitted();
 		addHeader(name, String.valueOf(value));
 	}
 
 	@Override
 	public void setStatus(int sc) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		this.statusCode = sc;
 	}
 
@@ -461,40 +1188,73 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (name == null)
 			return null;
 
-		List<String> values = getHeaders().get(name);
+		if ("Set-Cookie".equalsIgnoreCase(name)) {
+			List<@NonNull String> values = getHeaders().get(name);
+
+			if (values != null && !values.isEmpty())
+				return values.get(0);
+
+			List<@NonNull String> cookieValues = getSetCookieHeaderValues();
+			return cookieValues.isEmpty() ? null : cookieValues.get(0);
+		}
+
+		List<@NonNull String> values = getHeaders().get(name);
 		return values == null || values.size() == 0 ? null : values.get(0);
 	}
 
 	@Override
-	@Nonnull
-	public Collection<String> getHeaders(@Nullable String name) {
+	@NonNull
+	public Collection<@NonNull String> getHeaders(@Nullable String name) {
 		if (name == null)
 			return List.of();
 
-		List<String> values = getHeaders().get(name);
+		if ("Set-Cookie".equalsIgnoreCase(name)) {
+			List<@NonNull String> values = getHeaders().get(name);
+			List<@NonNull String> cookieValues = getSetCookieHeaderValues();
+
+			if ((values == null || values.isEmpty()) && cookieValues.isEmpty())
+				return List.of();
+
+			List<@NonNull String> combined = new ArrayList<>();
+
+			if (values != null)
+				combined.addAll(values);
+
+			combined.addAll(cookieValues);
+			return Collections.unmodifiableList(combined);
+		}
+
+		List<@NonNull String> values = getHeaders().get(name);
 		return values == null ? List.of() : Collections.unmodifiableList(values);
 	}
 
 	@Override
-	@Nonnull
-	public Collection<String> getHeaderNames() {
-		return Collections.unmodifiableSet(getHeaders().keySet());
+	@NonNull
+	public Collection<@NonNull String> getHeaderNames() {
+		Set<@NonNull String> names = new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+		names.addAll(getHeaders().keySet());
+
+		if (!getCookies().isEmpty())
+			names.add("Set-Cookie");
+
+		return Collections.unmodifiableSet(names);
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getCharacterEncoding() {
-		return getCharset().orElse(DEFAULT_CHARSET).name();
+		return getEffectiveCharset().name();
 	}
 
 	@Override
 	@Nullable
 	public String getContentType() {
-		return this.contentType;
+		String headerValue = getHeader("Content-Type");
+		return headerValue != null ? headerValue : this.contentType;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ServletOutputStream getOutputStream() throws IOException {
 		// Returns a ServletOutputStream suitable for writing binary data in the response.
 		// The servlet container does not encode the binary data.
@@ -505,10 +1265,9 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (currentResponseWriteMethod == ResponseWriteMethod.UNSPECIFIED) {
 			setResponseWriteMethod(ResponseWriteMethod.SERVLET_OUTPUT_STREAM);
 			this.servletOutputStream = SokletServletOutputStream.withOutputStream(getResponseOutputStream())
-					.onWriteOccurred((ignored1, ignored2) -> {
-						// Flip to "committed" if any write occurs
+					.onWriteOccurred((ignored1, ignored2) -> maybeCommitOnWrite())
+					.onWriteFinalized((ignored) -> {
 						setResponseCommitted(true);
-					}).onWriteFinalized((ignored) -> {
 						setResponseFinalized(true);
 					}).build();
 			return getServletOutputStream().get();
@@ -520,12 +1279,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		}
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean writerObtained() {
 		return getResponseWriteMethod() == ResponseWriteMethod.PRINT_WRITER;
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<String> extractCharsetFromContentType(@Nullable String type) {
 		if (type == null)
 			return Optional.empty();
@@ -548,14 +1307,14 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	// Helper: remove any charset=... from Content-Type (preserve other params)
-	@Nonnull
+	@NonNull
 	private Optional<String> stripCharsetParam(@Nullable String type) {
 		if (type == null)
 			return Optional.empty();
 
 		String[] parts = type.split(";");
 		String base = parts[0].trim();
-		List<String> kept = new ArrayList<>();
+		List<@NonNull String> kept = new ArrayList<>();
 
 		for (int i = 1; i < parts.length; i++) {
 			String p = parts[i].trim();
@@ -568,9 +1327,9 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	// Helper: ensure Content-Type includes the given charset (replacing any existing one)
-	@Nonnull
+	@NonNull
 	private Optional<String> withCharset(@Nullable String type,
-																				 @Nonnull String charsetName) {
+																			 @NonNull String charsetName) {
 		requireNonNull(charsetName);
 
 		if (type == null)
@@ -585,30 +1344,33 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		// Returns a PrintWriter object that can send character text to the client.
 		// The PrintWriter uses the character encoding returned by getCharacterEncoding().
 		// If the response's character encoding has not been specified as described in getCharacterEncoding
-		// (i.e., the method just returns the default value ISO-8859-1), getWriter updates it to ISO-8859-1.
+		// (i.e., the method just returns the default value), getWriter updates it to the effective default.
 		// Calling flush() on the PrintWriter commits the response.
 		//
 		// Either this method or getOutputStream() may be called to write the body, not both, except when reset() has been called.
 		// Returns a PrintWriter that uses the character encoding returned by getCharacterEncoding().
-		// If not specified yet, calling getWriter() fixes the encoding to ISO-8859-1 per spec.
+		// If not specified yet, calling getWriter() fixes the encoding to the effective default.
 		ResponseWriteMethod currentResponseWriteMethod = getResponseWriteMethod();
 
 		if (currentResponseWriteMethod == ResponseWriteMethod.UNSPECIFIED) {
 			// Freeze encoding now
-			Charset enc = getCharset().orElse(DEFAULT_CHARSET);
+			Charset enc = getEffectiveCharset();
 			setCharset(enc); // record the chosen encoding explicitly
 
 			// If a content type is already present and lacks charset, append the frozen charset to header
-			if (this.contentType != null) {
-				Optional<String> csInHeader = extractCharsetFromContentType(this.contentType);
+			String currentContentType = getContentType();
+
+			if (currentContentType != null) {
+				Optional<String> csInHeader = extractCharsetFromContentType(currentContentType);
 				if (csInHeader.isEmpty() || !csInHeader.get().equalsIgnoreCase(enc.name())) {
-					String updated = withCharset(this.contentType, enc.name()).orElse(null);
+					String updated = withCharset(currentContentType, enc.name()).orElse(null);
 
 					if (updated != null) {
 						this.contentType = updated;
-						setHeader("Content-Type", updated);
+						putHeaderValue("Content-Type", updated, true);
 					} else {
-						setHeader("Content-Type", this.contentType);
+						this.contentType = currentContentType;
+						putHeaderValue("Content-Type", currentContentType, true);
 					}
 				}
 			}
@@ -618,8 +1380,11 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			this.printWriter =
 					SokletServletPrintWriter.withWriter(
 									new OutputStreamWriter(getResponseOutputStream(), enc))
-							.onWriteOccurred((ignored1, ignored2) -> setResponseCommitted(true))   // commit on first write
-							.onWriteFinalized((ignored) -> setResponseFinalized(true))
+							.onWriteOccurred((ignored1, ignored2) -> maybeCommitOnWrite())
+							.onWriteFinalized((ignored) -> {
+								setResponseCommitted(true);
+								setResponseFinalized(true);
+							})
 							.build();
 
 			return getPrintWriter().get();
@@ -633,7 +1398,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public void setCharacterEncoding(@Nullable String charset) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
 
 		// Spec: no effect after getWriter() or after commit
 		if (writerObtained())
@@ -644,44 +1410,59 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			setCharset(null);
 
 			// If a Content-Type is set, remove its charset=... parameter
-			if (this.contentType != null) {
-				String updated = stripCharsetParam(this.contentType).orElse(null);
+			String currentContentType = getContentType();
+
+			if (currentContentType != null) {
+				String updated = stripCharsetParam(currentContentType).orElse(null);
 				this.contentType = updated;
 				if (updated == null || updated.isBlank()) {
 					getHeaders().remove("Content-Type");
 				} else {
-					setHeader("Content-Type", updated);
+					putHeaderValue("Content-Type", updated, true);
 				}
 			}
 
 			return;
 		}
 
-		Charset cs = Charset.forName(charset);
+		Charset cs;
+
+		try {
+			cs = Charset.forName(charset);
+		} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+			return;
+		}
 		setCharset(cs);
 
 		// If a Content-Type is set, reflect/replace the charset=... in the header
-		if (this.contentType != null) {
-			String updated = withCharset(this.contentType, cs.name()).orElse(null);
+		String currentContentType = getContentType();
+
+		if (currentContentType != null) {
+			String updated = withCharset(currentContentType, cs.name()).orElse(null);
 
 			if (updated != null) {
 				this.contentType = updated;
-				setHeader("Content-Type", updated);
+				putHeaderValue("Content-Type", updated, true);
 			} else {
-				setHeader("Content-Type", this.contentType);
+				this.contentType = currentContentType;
+				putHeaderValue("Content-Type", currentContentType, true);
 			}
 		}
 	}
 
 	@Override
 	public void setContentLength(int len) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		setHeader("Content-Length", String.valueOf(len));
 	}
 
 	@Override
 	public void setContentLengthLong(long len) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		setHeader("Content-Length", String.valueOf(len));
 	}
 
@@ -706,8 +1487,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			// If caller specified charset=..., adopt it as the current explicit charset
 			Optional<String> cs = extractCharsetFromContentType(type);
 			if (cs.isPresent()) {
-				setCharset(Charset.forName(cs.get()));
-				setHeader("Content-Type", type);
+				try {
+					setCharset(Charset.forName(cs.get()));
+				} catch (IllegalCharsetNameException | UnsupportedCharsetException ignored) {
+					// Ignore invalid charset token; leave current charset unchanged.
+				}
+				putHeaderValue("Content-Type", type, true);
 			} else {
 				// No charset in type. If an explicit charset already exists (via setCharacterEncoding),
 				// reflect it in the header; otherwise just set the type as-is.
@@ -716,12 +1501,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 					if (updated != null) {
 						this.contentType = updated;
-						setHeader("Content-Type", updated);
+						putHeaderValue("Content-Type", updated, true);
 					} else {
-						setHeader("Content-Type", type);
+						putHeaderValue("Content-Type", type, true);
 					}
 				} else {
-					setHeader("Content-Type", type);
+					putHeaderValue("Content-Type", type, true);
 				}
 			}
 		} else {
@@ -740,10 +1525,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 			if (normalized != null) {
 				this.contentType = normalized;
-				setHeader("Content-Type", normalized);
+				putHeaderValue("Content-Type", normalized, true);
 			} else {
 				this.contentType = type;
-				setHeader("Content-Type", type);
+				putHeaderValue("Content-Type", type, true);
 			}
 		}
 	}
@@ -752,12 +1537,17 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	public void setBufferSize(int size) {
 		ensureResponseIsUncommitted();
 
+		if (size <= 0)
+			throw new IllegalArgumentException("Buffer size must be greater than 0");
+
 		// Per Servlet spec, setBufferSize must be called before any content is written
-		if (writerObtained() || getServletOutputStream().isPresent() || getResponseOutputStream().size() > 0)
+		if (getResponseOutputStream().size() > 0)
 			throw new IllegalStateException("setBufferSize must be called before any content is written");
 
 		setResponseBufferSizeInBytes(size);
-		setResponseOutputStream(new ByteArrayOutputStream(getResponseBufferSizeInBytes()));
+
+		if (!writerObtained() && getServletOutputStream().isEmpty())
+			setResponseOutputStream(new ByteArrayOutputStream(getResponseBufferSizeInBytes()));
 	}
 
 	@Override
@@ -767,9 +1557,19 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	@Override
 	public void flushBuffer() throws IOException {
-		ensureResponseIsUncommitted();
-		setResponseCommitted(true);
-		getResponseOutputStream().flush();
+		if (!isCommitted())
+			setResponseCommitted(true);
+
+		SokletServletPrintWriter currentWriter = getPrintWriter().orElse(null);
+		SokletServletOutputStream currentOutputStream = getServletOutputStream().orElse(null);
+
+		if (currentWriter != null) {
+			currentWriter.flush();
+		} else if (currentOutputStream != null) {
+			currentOutputStream.flush();
+		} else {
+			getResponseOutputStream().flush();
+		}
 	}
 
 	@Override
@@ -806,107 +1606,38 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.contentType = null;
 		setCharset(null);
 		this.locale = null;
+		this.errorMessage = null;
+		this.redirectUrl = null;
 	}
 
 	@Override
 	public void setLocale(@Nullable Locale locale) {
-		ensureResponseIsUncommitted();
+		if (isCommitted())
+			return;
+
 		this.locale = locale;
+
+		if (locale != null && !writerObtained() && getCharset().isEmpty()) {
+			Charset contextCharset = getContextResponseCharset();
+			Charset selectedCharset = contextCharset == null ? DEFAULT_CHARSET : contextCharset;
+			setCharacterEncoding(selectedCharset.name());
+		}
+
+		if (locale == null) {
+			getHeaders().remove("Content-Language");
+			return;
+		}
+
+		String tag = locale.toLanguageTag();
+
+		if (tag.isBlank())
+			getHeaders().remove("Content-Language");
+		else
+			putHeaderValue("Content-Language", tag, true);
 	}
 
 	@Override
 	public Locale getLocale() {
-		return this.locale;
-	}
-
-	// *** Jakarta-specific below
-
-	@Nullable
-	private Supplier<Map<String, String>> trailerFieldsSupplier;
-
-	@Nonnull
-	private String resolveRedirectLocation(@Nonnull String location) {
-		requireNonNull(location);
-
-		// This accepts relative URLs and converts them to a location String suitable for the Location header.
-		String finalLocation;
-
-		if (location.startsWith("/")) {
-			finalLocation = location;
-		} else {
-			try {
-				new URL(location); // absolute
-				finalLocation = location;
-			} catch (MalformedURLException ignored) {
-				String base = getRequestPath();
-				int idx = base.lastIndexOf('/');
-				String parent = (idx <= 0) ? "/" : base.substring(0, idx);
-				finalLocation = parent.endsWith("/") ? parent + location : parent + "/" + location;
-			}
-		}
-
-		return finalLocation;
-	}
-
-	private void doSendRedirect(@Nonnull String location,
-																int statusCode,
-																boolean clearBuffer) throws IOException {
-		requireNonNull(location);
-
-		ensureResponseIsUncommitted();
-		setStatus(statusCode);
-
-		String finalLocation = resolveRedirectLocation(location);
-
-		setRedirectUrl(finalLocation);
-		setHeader("Location", finalLocation);
-
-		if (clearBuffer)
-			resetBuffer();
-
-		flushBuffer();
-		setResponseCommitted(true);
-	}
-
-	@Override
-	public void sendRedirect(@Nonnull String location,
-													 int statusCode) throws IOException {
-		requireNonNull(location);
-		doSendRedirect(location, statusCode, true);
-	}
-
-	@Override
-	public void sendRedirect(@Nonnull String location,
-													 boolean clearBuffer) throws IOException {
-		requireNonNull(location);
-		doSendRedirect(location, HttpServletResponse.SC_FOUND, clearBuffer);
-	}
-
-	@Override
-	public void sendRedirect(@Nonnull String location,
-													 int statusCode,
-													 boolean clearBuffer) throws IOException {
-		requireNonNull(location);
-		doSendRedirect(location, statusCode, clearBuffer);
-	}
-
-	@Override
-	public void setTrailerFields(@Nullable Supplier<Map<String, String>> supplier) {
-		// Store the supplier; Soklet does not currently write HTTP trailers when sending the response body.
-		this.trailerFieldsSupplier = supplier;
-	}
-
-	@Override
-	@Nullable
-	public Supplier<Map<String, String>> getTrailerFields() {
-		return this.trailerFieldsSupplier;
-	}
-
-	@Override
-	public void setCharacterEncoding(@Nullable Charset charset) {
-		if (charset == null)
-			setCharacterEncoding((String) null);
-		else
-			setCharacterEncoding(charset.name());
+		return this.locale == null ? Locale.getDefault() : this.locale;
 	}
 }

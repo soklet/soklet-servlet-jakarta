@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,27 @@ package com.soklet.servlet.jakarta;
 import com.soklet.HttpMethod;
 import com.soklet.MarshaledResponse;
 import com.soklet.Request;
+import com.soklet.Utilities.EffectiveOriginResolver.TrustPolicy;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 
 /*
  * Additional tests to cover servlet interop odds-and-ends semantics that were not exercised elsewhere.
@@ -37,7 +50,7 @@ import java.util.Set;
 public class AdditionalInteropTests {
 	@Test
 	public void encodeUrlPassThrough() {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		String in = "http://example.com/a?b=c";
 		Assertions.assertEquals(in, resp.encodeURL(in));
 		Assertions.assertEquals(in, resp.encodeRedirectURL(in));
@@ -47,11 +60,12 @@ public class AdditionalInteropTests {
 
 	@Test
 	public void containsHeaderIsCaseInsensitive() {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.addHeader("X-Test", "1");
 		Assertions.assertTrue(resp.containsHeader("x-test"));
 		Assertions.assertTrue(resp.containsHeader("X-TEST"));
 		Assertions.assertFalse(resp.containsHeader("missing"));
+		Assertions.assertFalse(resp.containsHeader(null));
 	}
 
 	@Test
@@ -69,25 +83,69 @@ public class AdditionalInteropTests {
 	}
 
 	@Test
+	public void serverNameAndPortComeFromHostHeader() {
+		Request req = Request.withPath(HttpMethod.GET, "/p")
+				.headers(Map.of("Host", Set.of("example.com:8443")))
+				.build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertEquals("example.com", http.getServerName());
+		Assertions.assertEquals(8443, http.getServerPort());
+		Assertions.assertTrue(http.getRequestURL().toString().startsWith("http://example.com:8443/p"));
+
+		Request reqDefault = Request.withPath(HttpMethod.GET, "/p")
+				.headers(Map.of("Host", Set.of("example.com")))
+				.build();
+		HttpServletRequest httpDefault = SokletHttpServletRequest.withRequest(reqDefault).build();
+		Assertions.assertEquals("example.com", httpDefault.getServerName());
+		Assertions.assertEquals(80, httpDefault.getServerPort());
+	}
+
+	@Test
 	public void getServerPortDefaultsFromScheme() {
 		// https without explicit port -> 443
 		Request httpsReq = Request.withPath(HttpMethod.GET, "/p")
 				.headers(Map.of("X-Forwarded-Proto", Set.of("https"), "Host", Set.of("example.com")))
 				.build();
-		HttpServletRequest https = SokletHttpServletRequest.withRequest(httpsReq).build();
+		HttpServletRequest https = SokletHttpServletRequest.withRequest(httpsReq)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
 		Assertions.assertEquals(443, https.getServerPort());
 
 		// http without explicit port -> 80
 		Request httpReq = Request.withPath(HttpMethod.GET, "/p")
 				.headers(Map.of("X-Forwarded-Proto", Set.of("http"), "Host", Set.of("example.com")))
 				.build();
-		HttpServletRequest http = SokletHttpServletRequest.withRequest(httpReq).build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(httpReq)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
 		Assertions.assertEquals(80, http.getServerPort());
 	}
 
 	@Test
+	public void getServerPortDefaultsWithoutHostHeader() {
+		Request httpsReq = Request.withPath(HttpMethod.GET, "/p")
+				.headers(Map.of("X-Forwarded-Proto", Set.of("https")))
+				.build();
+		HttpServletRequest https = SokletHttpServletRequest.withRequest(httpsReq)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
+		Assertions.assertEquals(443, https.getServerPort());
+	}
+
+	@Test
+	public void getServerPortUsesLocalPortWhenHostOmitsPort() {
+		Request req = Request.withPath(HttpMethod.GET, "/p")
+				.headers(Map.of("Host", Set.of("example.com")))
+				.build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
+				.port(8081)
+				.build();
+		Assertions.assertEquals(8081, http.getServerPort());
+	}
+
+	@Test
 	public void headerNamesAreUnmodifiable() {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.addHeader("A", "1");
 		var names = resp.getHeaderNames();
 		Assertions.assertThrows(UnsupportedOperationException.class, () -> names.add("B"));
@@ -95,14 +153,52 @@ public class AdditionalInteropTests {
 
 	@Test
 	public void flushBufferCommitsResponse() throws Exception {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.flushBuffer();
-		Assertions.assertThrows(IllegalStateException.class, () -> resp.setHeader("X", "1"));
+		Assertions.assertTrue(resp.isCommitted());
+		Assertions.assertDoesNotThrow(() -> resp.setHeader("X", "1"));
+		Assertions.assertNull(resp.getHeader("X"));
+	}
+
+	@Test
+	public void outputStreamFlushCommitsResponse() throws Exception {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		resp.getOutputStream().flush();
+		Assertions.assertTrue(resp.isCommitted());
+		Assertions.assertDoesNotThrow(() -> resp.setHeader("X", "1"));
+		Assertions.assertNull(resp.getHeader("X"));
+	}
+
+	@Test
+	public void writerFlushCommitsResponse() throws Exception {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		resp.getWriter().flush();
+		Assertions.assertTrue(resp.isCommitted());
+		Assertions.assertDoesNotThrow(() -> resp.setHeader("X", "1"));
+		Assertions.assertNull(resp.getHeader("X"));
+	}
+
+	@Test
+	public void flushBufferAfterCommitIsAllowed() throws Exception {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		resp.flushBuffer();
+		Assertions.assertDoesNotThrow(resp::flushBuffer);
+	}
+
+	@Test
+	public void contentTypeReflectsHeaderValue() {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		resp.setHeader("Content-Type", "text/plain");
+		Assertions.assertEquals("text/plain", resp.getContentType());
+
+		SokletHttpServletResponse respWithAdd = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		respWithAdd.addHeader("Content-Type", "application/json");
+		Assertions.assertEquals("application/json", respWithAdd.getContentType());
 	}
 
 	@Test
 	public void contentLengthHeadersAreSet() {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.withRequestPath("/x");
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.setContentLength(42);
 		resp.setContentLengthLong(43L);
 		MarshaledResponse mr = resp.toMarshaledResponse();
@@ -111,9 +207,126 @@ public class AdditionalInteropTests {
 	}
 
 	@Test
-	public void getResourcePathsCurrentlyNotEmpty() {
-		var ctx = SokletServletContext.withDefaults();
-		Assertions.assertFalse(ctx.getResourcePaths("/").isEmpty());
+	public void getResourcePathsReturnsNullForInvalidPath() {
+		var ctx = SokletServletContext.fromDefaults();
+		Assertions.assertNull(ctx.getResourcePaths("relative"));
+	}
+
+	@Test
+	public void getResourceThrowsOnInvalidPath() {
+		var ctx = SokletServletContext.fromDefaults();
+		Assertions.assertThrows(MalformedURLException.class, () -> ctx.getResource("relative"));
+	}
+
+	@Test
+	public void getResourcePathsReturnsNullWhenMissing() {
+		var ctx = SokletServletContext.fromDefaults();
+		Assertions.assertNull(ctx.getResourcePaths("/definitely-not-present"));
+	}
+
+	@Test
+	public void getContextReturnsNullForOtherContext() {
+		var ctx = SokletServletContext.fromDefaults();
+		Assertions.assertNull(ctx.getContext("/other"));
+	}
+
+	@Test
+	public void requestDispatcherIsNullWhenUnsupported() {
+		var ctx = SokletServletContext.fromDefaults();
+		Assertions.assertNull(ctx.getRequestDispatcher("/x"));
+	}
+
+	@Test
+	public void requestDispatcherFromRequestIsNullWhenUnsupported() {
+		Request req = Request.withPath(HttpMethod.GET, "/p").build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertNull(http.getRequestDispatcher("/x"));
+	}
+
+	@Test
+	public void filesystemResourceRootResolvesResources(@TempDir Path tempDir) throws Exception {
+		Path rootFile = tempDir.resolve("root.txt");
+		Path dir = Files.createDirectories(tempDir.resolve("dir"));
+		Path childFile = dir.resolve("child.txt");
+
+		Files.writeString(rootFile, "root", StandardCharsets.UTF_8);
+		Files.writeString(childFile, "child", StandardCharsets.UTF_8);
+
+		SokletServletContext ctx = SokletServletContext.builder()
+				.filesystemResourceRoot(tempDir)
+				.build();
+		Set<String> rootPaths = ctx.getResourcePaths("/");
+		Assertions.assertTrue(rootPaths.contains("/root.txt"));
+		Assertions.assertTrue(rootPaths.contains("/dir/"));
+		Assertions.assertNotNull(ctx.getResource("/root.txt"));
+		Assertions.assertNotNull(ctx.getResource("/dir/child.txt"));
+		Assertions.assertNull(ctx.getResource("/../root.txt"));
+
+		Set<String> dirPaths = ctx.getResourcePaths("/dir/");
+		Assertions.assertTrue(dirPaths.contains("/dir/child.txt"));
+
+		try (InputStream in = ctx.getResourceAsStream("/root.txt")) {
+			Assertions.assertNotNull(in);
+		}
+	}
+
+	@Test
+	public void classpathResourceRootResolvesResources() throws Exception {
+		SokletServletContext ctx = SokletServletContext.builder()
+				.classpathResourceRoot("testdata")
+				.build();
+		Assertions.assertNotNull(ctx.getResource("/hello.txt"));
+
+		Set<String> rootPaths = ctx.getResourcePaths("/");
+		Assertions.assertTrue(rootPaths.contains("/hello.txt"));
+
+		try (InputStream in = ctx.getResourceAsStream("/hello.txt")) {
+			Assertions.assertNotNull(in);
+		}
+	}
+
+	@Test
+	public void classpathResourceRootListsJarEntriesWithoutDirectoryEntry(@TempDir Path tempDir) throws Exception {
+		Path jarPath = tempDir.resolve("test.jar");
+
+		try (OutputStream out = Files.newOutputStream(jarPath);
+				 JarOutputStream jar = new JarOutputStream(out)) {
+			JarEntry entry = new JarEntry("root/child.txt");
+			jar.putNextEntry(entry);
+			jar.write("child".getBytes(StandardCharsets.UTF_8));
+			jar.closeEntry();
+		}
+
+		ClassLoader previous = Thread.currentThread().getContextClassLoader();
+
+		try (URLClassLoader loader = new URLClassLoader(new URL[]{jarPath.toUri().toURL()}, previous)) {
+			Thread.currentThread().setContextClassLoader(loader);
+
+			SokletServletContext ctx = SokletServletContext.builder()
+					.classpathResourceRoot("root")
+					.build();
+
+			Set<String> rootPaths = ctx.getResourcePaths("/");
+			Assertions.assertNotNull(rootPaths);
+			Assertions.assertTrue(rootPaths.contains("/child.txt"));
+			Assertions.assertNotNull(ctx.getResource("/child.txt"));
+		} finally {
+			Thread.currentThread().setContextClassLoader(previous);
+		}
+	}
+
+	@Test
+	public void pathTranslatedIsNullWithoutFilesystemMapping() {
+		Request req = Request.withPath(HttpMethod.GET, "/p").build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertNull(http.getPathTranslated());
+	}
+
+	@Test
+	public void localPortDefaultsToZeroWhenUnset() {
+		Request req = Request.withPath(HttpMethod.GET, "/p").build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertEquals(0, http.getLocalPort());
 	}
 
 	@Test
@@ -121,8 +334,24 @@ public class AdditionalInteropTests {
 		var req = Request.withPath(HttpMethod.GET, "/p")
 				.headers(Map.of("X-Forwarded-Proto", Set.of("https"), "Host", Set.of("example.com")))
 				.build();
-		var http = SokletHttpServletRequest.withRequest(req).build();
+		var http = SokletHttpServletRequest.withRequest(req)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
 		Assertions.assertEquals("https", http.getScheme());
 		Assertions.assertTrue(http.isSecure());
+	}
+
+	@Test
+	public void responseLocaleDefaultsToSystemLocale() {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		Assertions.assertEquals(Locale.getDefault(), resp.getLocale());
+	}
+
+	@Test
+	public void responseLocaleSetsContentLanguageHeader() {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		resp.setLocale(Locale.CANADA_FRENCH);
+		MarshaledResponse mr = resp.toMarshaledResponse();
+		Assertions.assertEquals(Set.of("fr-CA"), mr.getHeaders().get("Content-Language"));
 	}
 }

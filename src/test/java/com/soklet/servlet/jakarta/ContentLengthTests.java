@@ -23,42 +23,47 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 
 /*
- * Additional tests for date header parsing.
+ * Verify request content-length semantics.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class DateHeaderParsingValidTests {
+public class ContentLengthTests {
 	@Test
-	public void parsesRfc1123() {
-		String stamp = DateTimeFormatter.RFC_1123_DATE_TIME
-				.withZone(ZoneId.of("GMT"))
-				.format(Instant.ofEpochMilli(1_725_000_000_000L));
-
-		Request request = Request.withPath(HttpMethod.GET, "/h")
-				.headers(Map.of("X-Test-Date", Set.of(stamp)))
+	public void contentLengthUsesHeaderWhenPresent() {
+		Request request = Request.withPath(HttpMethod.POST, "/x")
+				.headers(Map.of("Content-Length", Set.of("123")))
 				.build();
-
 		HttpServletRequest http = SokletHttpServletRequest.withRequest(request).build();
-		long millis = http.getDateHeader("X-Test-Date");
-		Assertions.assertEquals(1_725_000_000_000L, millis);
+
+		Assertions.assertEquals(123, http.getContentLength());
+		Assertions.assertEquals(123L, http.getContentLengthLong());
 	}
 
 	@Test
-	public void parsesEpochMillisAsFallback() {
-		Request request = Request.withPath(HttpMethod.GET, "/h")
-				.headers(Map.of("X-Test-Date", Set.of("1725000000000")))
+	public void contentLengthUsesBodyLengthWhenHeaderMissing() {
+		Request request = Request.withPath(HttpMethod.POST, "/x")
+				.body("abc".getBytes(StandardCharsets.US_ASCII))
 				.build();
-
 		HttpServletRequest http = SokletHttpServletRequest.withRequest(request).build();
-		long millis = http.getDateHeader("X-Test-Date");
-		Assertions.assertEquals(1_725_000_000_000L, millis);
+
+		Assertions.assertEquals(3, http.getContentLength());
+		Assertions.assertEquals(3L, http.getContentLengthLong());
+	}
+
+	@Test
+	public void contentLengthIntReturnsMinusOneOnOverflow() {
+		Request request = Request.withPath(HttpMethod.POST, "/x")
+				.headers(Map.of("Content-Length", Set.of("9999999999")))
+				.build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(request).build();
+
+		Assertions.assertEquals(-1, http.getContentLength());
+		Assertions.assertEquals(9_999_999_999L, http.getContentLengthLong());
 	}
 }

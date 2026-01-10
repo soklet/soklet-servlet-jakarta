@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,16 +18,18 @@ package com.soklet.servlet.jakarta;
 
 import com.soklet.HttpMethod;
 import com.soklet.Request;
+import com.soklet.Utilities.EffectiveOriginResolver.TrustPolicy;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.Set;
 
 /*
- * Tests for getRemoteAddr() and getRemoteHost() using X-Forwarded-For.
+ * Tests for getRemoteAddr() and getRemoteHost() using Forwarded and X-Forwarded-For.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
@@ -39,8 +41,57 @@ public class RemoteAddressParsingTests {
 				.headers(Map.of("X-Forwarded-For", Set.of("203.0.113.195, 198.51.100.178")))
 				.build();
 
-		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
 		Assertions.assertEquals("203.0.113.195", http.getRemoteAddr());
+	}
+
+	@Test
+	public void picksFirstAddressFromForwarded() {
+		Request req = Request.withPath(HttpMethod.GET, "/x")
+				.headers(Map.of("Forwarded", Set.of("for=203.0.113.195, for=198.51.100.178")))
+				.build();
+
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
+		Assertions.assertEquals("203.0.113.195", http.getRemoteAddr());
+	}
+
+	@Test
+	public void forwardedIpv6WithPortIsParsed() {
+		Request req = Request.withPath(HttpMethod.GET, "/x")
+				.headers(Map.of("Forwarded", Set.of("for=\"[2001:db8::1]:4711\"")))
+				.build();
+
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
+		Assertions.assertEquals("2001:db8::1", http.getRemoteAddr());
+	}
+
+	@Test
+	public void xffIgnoredWithoutTrustPolicy() {
+		Request req = Request.withPath(HttpMethod.GET, "/x")
+				.headers(Map.of("X-Forwarded-For", Set.of("203.0.113.195, 198.51.100.178")))
+				.remoteAddress(new InetSocketAddress("203.0.113.50", 1234))
+				.build();
+
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertEquals("203.0.113.50", http.getRemoteAddr());
+		Assertions.assertEquals("203.0.113.50", http.getRemoteHost());
+	}
+
+	@Test
+	public void fallsBackToRemoteAddressWhenXffMissing() {
+		Request req = Request.withPath(HttpMethod.GET, "/x")
+				.remoteAddress(new InetSocketAddress("203.0.113.50", 1234))
+				.build();
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
+		Assertions.assertEquals("203.0.113.50", http.getRemoteAddr());
+		Assertions.assertEquals("203.0.113.50", http.getRemoteHost());
+		Assertions.assertEquals(1234, http.getRemotePort());
 	}
 
 	@Test

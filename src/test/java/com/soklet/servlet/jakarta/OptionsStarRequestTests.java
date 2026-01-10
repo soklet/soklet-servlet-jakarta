@@ -23,37 +23,21 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
 
 /*
+ * Verify OPTIONS * request URL/URI semantics.
+ *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class CaseInsensitiveHeadersTests {
+public class OptionsStarRequestTests {
 	@Test
-	public void requestHeaderLookupIsCaseInsensitive() {
-		Request req = Request.withPath(HttpMethod.GET, "/x")
-				.headers(Map.of("X-Test", Set.of("one")))
-				.build();
+	public void optionsStarUsesSplatForRequestUrlAndUri() {
+		Request request = Request.withRawUrl(HttpMethod.OPTIONS, "*").build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
 
-		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
-		Assertions.assertEquals("one", http.getHeader("x-test"));
-		Assertions.assertEquals("one", http.getHeader("X-TEST"));
-	}
-
-	@Test
-	public void requestHeaderReturnsFirstValue() {
-		Set<String> values = new LinkedHashSet<>();
-		values.add("one");
-		values.add("two");
-
-		Request req = Request.withPath(HttpMethod.GET, "/x")
-				.headers(Map.of("X-Test", values))
-				.build();
-
-		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
-		Assertions.assertEquals("one", http.getHeader("X-Test"));
+		Assertions.assertEquals("*", httpServletRequest.getRequestURI());
+		Assertions.assertEquals("*", httpServletRequest.getRequestURL().toString());
+		Assertions.assertNull(httpServletRequest.getQueryString());
 	}
 }

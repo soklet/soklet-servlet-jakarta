@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,11 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
@@ -42,5 +47,110 @@ public class ParameterTests {
 
 		String[] missing = httpServletRequest.getParameterValues("none");
 		Assertions.assertNull(missing);
+	}
+
+	@Test
+	public void parameterNamesPreserveQueryThenFormOrder() {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p?b=2&a=1&b=2")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("c=3&a=4&b=5".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+
+		List<String> names = Collections.list(httpServletRequest.getParameterNames());
+		Assertions.assertEquals(List.of("b", "a", "c"), names);
+	}
+
+	@Test
+	public void parameterMapPreservesValueOrder() {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p?one=a&one=b&two=z&one=a")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("one=c&one=d&two=y&one=b".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+
+		Map<String, String[]> parameterMap = httpServletRequest.getParameterMap();
+
+		Assertions.assertArrayEquals(new String[]{"a", "b", "c", "d"}, parameterMap.get("one"));
+		Assertions.assertArrayEquals(new String[]{"z", "y"}, parameterMap.get("two"));
+	}
+
+	@Test
+	public void formParametersIgnoredAfterInputStream() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p?query=1")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("form=2".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+		httpServletRequest.getInputStream();
+
+		Assertions.assertEquals("1", httpServletRequest.getParameter("query"));
+		Assertions.assertNull(httpServletRequest.getParameter("form"));
+		Assertions.assertArrayEquals(new String[]{"1"}, httpServletRequest.getParameterValues("query"));
+		Assertions.assertNull(httpServletRequest.getParameterValues("form"));
+	}
+
+	@Test
+	public void formParametersIgnoredAfterReader() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("form=2".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+		httpServletRequest.getReader();
+
+		Assertions.assertNull(httpServletRequest.getParameter("form"));
+		Assertions.assertNull(httpServletRequest.getParameterValues("form"));
+	}
+
+	@Test
+	public void queryParametersDoNotConsumeBodyForInputStream() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p?query=1")
+				.headers(Map.of("Content-Type", Set.of("text/plain")))
+				.body("body".getBytes(StandardCharsets.UTF_8))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+
+		Assertions.assertEquals("1", httpServletRequest.getParameter("query"));
+
+		String body = new String(httpServletRequest.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		Assertions.assertEquals("body", body);
+	}
+
+	@Test
+	public void queryParametersDoNotConsumeBodyForReader() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p?query=1")
+				.headers(Map.of("Content-Type", Set.of("text/plain")))
+				.body("body".getBytes(StandardCharsets.UTF_8))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+
+		Assertions.assertEquals("1", httpServletRequest.getParameter("query"));
+
+		Assertions.assertEquals('b', httpServletRequest.getReader().read());
+	}
+
+	@Test
+	public void inputStreamEmptyAfterParameterAccess() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("form=2".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+		Assertions.assertEquals("2", httpServletRequest.getParameter("form"));
+
+		Assertions.assertEquals(-1, httpServletRequest.getInputStream().read());
+	}
+
+	@Test
+	public void readerEmptyAfterParameterAccess() throws Exception {
+		Request request = Request.withRawUrl(HttpMethod.POST, "/p")
+				.headers(Map.of("Content-Type", Set.of("application/x-www-form-urlencoded")))
+				.body("form=2".getBytes(StandardCharsets.US_ASCII))
+				.build();
+		HttpServletRequest httpServletRequest = SokletHttpServletRequest.withRequest(request).build();
+		Assertions.assertEquals("2", httpServletRequest.getParameter("form"));
+
+		Assertions.assertEquals(-1, httpServletRequest.getReader().read());
 	}
 }

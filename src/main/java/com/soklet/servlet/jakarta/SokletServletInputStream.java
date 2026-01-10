@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,10 @@ package com.soklet.servlet.jakarta;
 
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletInputStream;
+import org.jspecify.annotations.NonNull;
 
-import javax.annotation.Nonnull;
 import javax.annotation.concurrent.NotThreadSafe;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -34,38 +35,72 @@ import static java.util.Objects.requireNonNull;
  */
 @NotThreadSafe
 public final class SokletServletInputStream extends ServletInputStream {
-	@Nonnull
+	@NonNull
 	private final InputStream inputStream;
-	@Nonnull
+	@NonNull
 	private Boolean finished;
+	@NonNull
+	private Boolean closed;
 
-	@Nonnull
-	public static SokletServletInputStream withInputStream(@Nonnull InputStream inputStream) {
+	@NonNull
+	public static SokletServletInputStream fromInputStream(@NonNull InputStream inputStream) {
 		requireNonNull(inputStream);
 		return new SokletServletInputStream(inputStream);
 	}
 
-	private SokletServletInputStream(@Nonnull InputStream inputStream) {
+	private SokletServletInputStream(@NonNull InputStream inputStream) {
 		super();
 		requireNonNull(inputStream);
 
 		this.inputStream = inputStream;
 		this.finished = false;
+		this.closed = false;
+
+		if (inputStream instanceof ByteArrayInputStream && ((ByteArrayInputStream) inputStream).available() == 0)
+			this.finished = true;
 	}
 
-	@Nonnull
+	@NonNull
 	private InputStream getInputStream() {
 		return this.inputStream;
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean getFinished() {
 		return this.finished;
 	}
 
-	private void setFinished(@Nonnull Boolean finished) {
+	private void setFinished(@NonNull Boolean finished) {
 		requireNonNull(finished);
 		this.finished = finished;
+	}
+
+	@NonNull
+	private Boolean getClosed() {
+		return this.closed;
+	}
+
+	private void setClosed(@NonNull Boolean closed) {
+		requireNonNull(closed);
+		this.closed = closed;
+	}
+
+	private void ensureOpen() throws IOException {
+		if (getClosed())
+			throw new IOException("Stream is closed");
+	}
+
+	private void updateFinishedAfterRead(int bytesRead,
+																			 boolean bytesConsumed) {
+		if (bytesRead == -1) {
+			setFinished(true);
+			return;
+		}
+
+		if (bytesConsumed && getInputStream() instanceof ByteArrayInputStream
+				&& ((ByteArrayInputStream) getInputStream()).available() == 0) {
+			setFinished(true);
+		}
 	}
 
 	// Implementation of ServletInputStream methods below:
@@ -77,33 +112,53 @@ public final class SokletServletInputStream extends ServletInputStream {
 
 	@Override
 	public boolean isReady() {
-		return true;
+		return !getClosed();
 	}
 
 	@Override
 	public int available() throws IOException {
+		ensureOpen();
 		return getInputStream().available();
 	}
 
 	@Override
 	public void close() throws IOException {
-		super.close();
-		getInputStream().close();
+		if (getClosed())
+			return;
+
+		try {
+			super.close();
+			getInputStream().close();
+		} finally {
+			setClosed(true);
+			setFinished(true);
+		}
 	}
 
 	@Override
-	public void setReadListener(@Nonnull ReadListener readListener) {
+	public void setReadListener(@NonNull ReadListener readListener) {
 		requireNonNull(readListener);
 		throw new IllegalStateException(format("%s functionality is not supported", ReadListener.class.getSimpleName()));
 	}
 
 	@Override
 	public int read() throws IOException {
+		ensureOpen();
 		int data = getInputStream().read();
-
-		if (data == -1)
-			setFinished(true);
+		updateFinishedAfterRead(data, data != -1);
 
 		return data;
+	}
+
+	@Override
+	public int read(@NonNull byte[] b,
+									int off,
+									int len) throws IOException {
+		requireNonNull(b);
+		ensureOpen();
+		int count = getInputStream().read(b, off, len);
+		updateFinishedAfterRead(count, count > 0);
+
+		return count;
 	}
 }

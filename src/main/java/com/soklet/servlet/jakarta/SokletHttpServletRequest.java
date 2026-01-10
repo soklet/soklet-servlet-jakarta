@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,11 @@
 
 package com.soklet.servlet.jakarta;
 
+import com.soklet.QueryFormat;
 import com.soklet.Request;
 import com.soklet.Utilities;
+import com.soklet.Utilities.EffectiveOriginResolver;
+import com.soklet.Utilities.EffectiveOriginResolver.TrustPolicy;
 import jakarta.servlet.AsyncContext;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;
@@ -28,16 +31,14 @@ import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.ServletRequest;
 import jakarta.servlet.ServletResponse;
 import jakarta.servlet.http.Cookie;
-import jakarta.servlet.http.HttpServletMapping;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
 import jakarta.servlet.http.HttpUpgradeHandler;
-import jakarta.servlet.http.MappingMatch;
 import jakarta.servlet.http.Part;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -46,6 +47,8 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
@@ -62,15 +65,16 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 import static java.lang.String.format;
 import static java.util.Locale.ROOT;
@@ -85,14 +89,18 @@ import static java.util.Objects.requireNonNull;
  */
 @NotThreadSafe
 public final class SokletHttpServletRequest implements HttpServletRequest {
-	@Nonnull
+	@NonNull
 	private static final Charset DEFAULT_CHARSET;
-	@Nonnull
+	@NonNull
 	private static final DateTimeFormatter RFC_1123_PARSER;
-	@Nonnull
+	@NonNull
 	private static final DateTimeFormatter RFC_1036_PARSER;
-	@Nonnull
+	@NonNull
 	private static final DateTimeFormatter ASCTIME_PARSER;
+	@NonNull
+	private static final String SESSION_COOKIE_NAME;
+	@NonNull
+	private static final String SESSION_URL_PARAM;
 
 	static {
 		DEFAULT_CHARSET = StandardCharsets.ISO_8859_1; // Per Servlet spec
@@ -116,33 +124,65 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 				.appendPattern(" HH:mm:ss yyyy")
 				.toFormatter(US)
 				.withZone(ZoneOffset.UTC);
+
+		SESSION_COOKIE_NAME = "JSESSIONID";
+		SESSION_URL_PARAM = "jsessionid";
 	}
 
-	@Nonnull
+	@NonNull
 	private final Request request;
 	@Nullable
 	private final String host;
 	@Nullable
 	private final Integer port;
-	@Nonnull
+	@NonNull
 	private final ServletContext servletContext;
 	@Nullable
 	private HttpSession httpSession;
-	@Nonnull
-	private final Map<String, Object> attributes;
-	@Nonnull
-	private final List<Cookie> cookies;
+	@NonNull
+	private final Map<@NonNull String, @NonNull Object> attributes;
+	@NonNull
+	private final List<@NonNull Cookie> cookies;
 	@Nullable
 	private Charset charset;
 	@Nullable
 	private String contentType;
+	@Nullable
+	private Map<@NonNull String, @NonNull Set<@NonNull String>> queryParameters;
+	@Nullable
+	private Map<@NonNull String, @NonNull Set<@NonNull String>> formParameters;
+	private boolean parametersAccessed;
+	private boolean bodyParametersAccessed;
+	private boolean sessionCreated;
+	@NonNull
+	private final TrustPolicy forwardedHeaderTrustPolicy;
+	@Nullable
+	private final Predicate<@NonNull InetSocketAddress> trustedProxyPredicate;
+	@Nullable
+	private final Boolean allowOriginFallback;
+	@Nullable
+	private SokletServletInputStream servletInputStream;
+	@Nullable
+	private BufferedReader reader;
+	@NonNull
+	private RequestReadMethod requestReadMethod;
+	@NonNull
+	private final String requestId;
+	@NonNull
+	private final ServletConnection servletConnection;
 
-	@Nonnull
-	public static Builder withRequest(@Nonnull Request request) {
+	@NonNull
+	public static SokletHttpServletRequest fromRequest(@NonNull Request request) {
+		requireNonNull(request);
+		return withRequest(request).build();
+	}
+
+	@NonNull
+	public static Builder withRequest(@NonNull Request request) {
 		return new Builder(request);
 	}
 
-	private SokletHttpServletRequest(@Nonnull Builder builder) {
+	private SokletHttpServletRequest(@NonNull Builder builder) {
 		requireNonNull(builder);
 		requireNonNull(builder.request);
 
@@ -153,82 +193,884 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		this.contentType = parseContentType(request).orElse(null);
 		this.host = builder.host;
 		this.port = builder.port;
-		this.servletContext = builder.servletContext == null ? SokletServletContext.withDefaults() : builder.servletContext;
+		this.servletContext = builder.servletContext == null ? SokletServletContext.fromDefaults() : builder.servletContext;
 		this.httpSession = builder.httpSession;
+		this.forwardedHeaderTrustPolicy = builder.forwardedHeaderTrustPolicy;
+		this.trustedProxyPredicate = builder.trustedProxyPredicate;
+		this.allowOriginFallback = builder.allowOriginFallback;
+		this.requestReadMethod = RequestReadMethod.UNSPECIFIED;
+		this.requestId = UUID.randomUUID().toString();
+		this.servletConnection = buildServletConnection();
 	}
 
-	@Nonnull
+	@NonNull
 	private Request getRequest() {
 		return this.request;
 	}
 
-	@Nonnull
-	private Map<String, Object> getAttributes() {
+	@NonNull
+	private Map<@NonNull String, @NonNull Object> getAttributes() {
 		return this.attributes;
 	}
 
-	@Nonnull
-	private List<Cookie> parseCookies(@Nonnull Request request) {
+	@NonNull
+	private List<@NonNull Cookie> parseCookies(@NonNull Request request) {
 		requireNonNull(request);
 
-		Map<String, Set<String>> cookies = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-		cookies.putAll(request.getCookies());
+		List<@NonNull Cookie> convertedCookies = new ArrayList<>();
+		Map<@NonNull String, @NonNull Set<@NonNull String>> headers = request.getHeaders();
 
-		List<Cookie> convertedCookies = new ArrayList<>(cookies.size());
+		for (Entry<@NonNull String, @NonNull Set<@NonNull String>> entry : headers.entrySet()) {
+			String headerName = entry.getKey();
 
-		for (Entry<String, Set<String>> entry : cookies.entrySet()) {
-			String name = entry.getKey();
-			Set<String> values = entry.getValue();
-
-			// Should never occur...
-			if (name == null)
+			if (headerName == null || !"cookie".equalsIgnoreCase(headerName.trim()))
 				continue;
 
-			for (String value : values)
-				convertedCookies.add(new Cookie(name, value));
+			Set<@NonNull String> headerValues = entry.getValue();
+
+			if (headerValues == null)
+				continue;
+
+			for (String headerValue : headerValues) {
+				headerValue = Utilities.trimAggressivelyToNull(headerValue);
+
+				if (headerValue == null)
+					continue;
+
+				for (String cookieComponent : splitCookieHeaderRespectingQuotes(headerValue)) {
+					cookieComponent = Utilities.trimAggressivelyToNull(cookieComponent);
+
+					if (cookieComponent == null)
+						continue;
+
+					String[] cookiePair = cookieComponent.split("=", 2);
+					String rawName = Utilities.trimAggressivelyToNull(cookiePair[0]);
+					if (cookiePair.length != 2)
+						continue;
+
+					String rawValue = Utilities.trimAggressivelyToEmpty(cookiePair[1]);
+
+					if (rawName == null)
+						continue;
+
+					String cookieValue = unquoteCookieValueIfNeeded(rawValue);
+					convertedCookies.add(new Cookie(rawName, cookieValue));
+				}
+			}
 		}
 
 		return convertedCookies;
 	}
 
-	@Nonnull
-	private Optional<Charset> parseCharacterEncoding(@Nonnull Request request) {
+	/**
+	 * Splits a Cookie header string into components on ';' but ONLY when not inside a quoted value.
+	 * Supports backslash-escaped quotes within quoted strings.
+	 */
+	@NonNull
+	private static List<@NonNull String> splitCookieHeaderRespectingQuotes(@NonNull String headerValue) {
+		List<@NonNull String> parts = new ArrayList<>();
+		StringBuilder current = new StringBuilder(headerValue.length());
+		boolean inQuotes = false;
+		boolean escape = false;
+
+		for (int i = 0; i < headerValue.length(); i++) {
+			char c = headerValue.charAt(i);
+
+			if (escape) {
+				current.append(c);
+				escape = false;
+				continue;
+			}
+
+			if (c == '\\') {
+				escape = true;
+				current.append(c);
+				continue;
+			}
+
+			if (c == '"') {
+				inQuotes = !inQuotes;
+				current.append(c);
+				continue;
+			}
+
+			if (c == ';' && !inQuotes) {
+				parts.add(current.toString());
+				current.setLength(0);
+				continue;
+			}
+
+			current.append(c);
+		}
+
+		if (current.length() > 0)
+			parts.add(current.toString());
+
+		return parts;
+	}
+
+	/**
+	 * Splits a header value on the given delimiter, ignoring delimiters inside quoted strings.
+	 * Supports backslash-escaped quotes within quoted strings.
+	 */
+	@NonNull
+	private static List<@NonNull String> splitHeaderValueRespectingQuotes(@NonNull String headerValue,
+																																				char delimiter) {
+		List<@NonNull String> parts = new ArrayList<>();
+		StringBuilder current = new StringBuilder(headerValue.length());
+		boolean inQuotes = false;
+		boolean escape = false;
+
+		for (int i = 0; i < headerValue.length(); i++) {
+			char c = headerValue.charAt(i);
+
+			if (escape) {
+				current.append(c);
+				escape = false;
+				continue;
+			}
+
+			if (c == '\\') {
+				escape = true;
+				current.append(c);
+				continue;
+			}
+
+			if (c == '"') {
+				inQuotes = !inQuotes;
+				current.append(c);
+				continue;
+			}
+
+			if (c == delimiter && !inQuotes) {
+				parts.add(current.toString());
+				current.setLength(0);
+				continue;
+			}
+
+			current.append(c);
+		}
+
+		if (current.length() > 0)
+			parts.add(current.toString());
+
+		return parts;
+	}
+
+	/**
+	 * If the cookie value is a quoted-string, remove surrounding quotes and unescape \" \\ and \; .
+	 * Otherwise returns the input as-is.
+	 */
+	@NonNull
+	private static String unquoteCookieValueIfNeeded(@NonNull String rawValue) {
+		requireNonNull(rawValue);
+
+		if (rawValue.length() >= 2 && rawValue.charAt(0) == '"' && rawValue.charAt(rawValue.length() - 1) == '"') {
+			String inner = rawValue.substring(1, rawValue.length() - 1);
+			StringBuilder sb = new StringBuilder(inner.length());
+			boolean escape = false;
+
+			for (int i = 0; i < inner.length(); i++) {
+				char c = inner.charAt(i);
+
+				if (escape) {
+					sb.append(c);
+					escape = false;
+				} else if (c == '\\') {
+					escape = true;
+				} else {
+					sb.append(c);
+				}
+			}
+
+			if (escape)
+				sb.append('\\');
+
+			return sb.toString();
+		}
+
+		return rawValue;
+	}
+
+	/**
+	 * Remove a single pair of surrounding quotes if present.
+	 */
+	@NonNull
+	private static String stripOptionalQuotes(@NonNull String value) {
+		requireNonNull(value);
+
+		if (value.length() >= 2) {
+			char first = value.charAt(0);
+			char last = value.charAt(value.length() - 1);
+
+			if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+				return value.substring(1, value.length() - 1);
+		}
+
+		return value;
+	}
+
+	@NonNull
+	private Optional<Charset> parseCharacterEncoding(@NonNull Request request) {
 		requireNonNull(request);
 		return Utilities.extractCharsetFromHeaders(request.getHeaders());
 	}
 
-	@Nonnull
-	private Optional<String> parseContentType(@Nonnull Request request) {
+	@NonNull
+	private Optional<String> parseContentType(@NonNull Request request) {
 		requireNonNull(request);
 		return Utilities.extractContentTypeFromHeaders(request.getHeaders());
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<HttpSession> getHttpSession() {
-		return Optional.ofNullable(this.httpSession);
+		HttpSession current = this.httpSession;
+
+		if (current instanceof SokletHttpSession && ((SokletHttpSession) current).isInvalidated()) {
+			this.httpSession = null;
+			return Optional.empty();
+		}
+
+		return Optional.ofNullable(current);
 	}
 
 	private void setHttpSession(@Nullable HttpSession httpSession) {
 		this.httpSession = httpSession;
 	}
 
-	@Nonnull
+	private void touchSession(@NonNull HttpSession httpSession,
+														boolean createdNow) {
+		requireNonNull(httpSession);
+
+		if (httpSession instanceof SokletHttpSession) {
+			SokletHttpSession sokletSession = (SokletHttpSession) httpSession;
+			sokletSession.markAccessed();
+
+			if (!createdNow && !this.sessionCreated)
+				sokletSession.markNotNew();
+		}
+	}
+
+	@NonNull
 	private Optional<Charset> getCharset() {
 		return Optional.ofNullable(this.charset);
+	}
+
+	@Nullable
+	private Charset getContextRequestCharset() {
+		String encoding = getServletContext().getRequestCharacterEncoding();
+
+		if (encoding == null || encoding.isBlank())
+			return null;
+
+		try {
+			return Charset.forName(encoding);
+		} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+			return null;
+		}
+	}
+
+	@NonNull
+	private Charset getEffectiveCharset() {
+		Charset explicit = this.charset;
+
+		if (explicit != null)
+			return explicit;
+
+		Charset context = getContextRequestCharset();
+		return context == null ? DEFAULT_CHARSET : context;
+	}
+
+	@Nullable
+	private Long getContentLengthHeaderValue() {
+		String value = getHeader("Content-Length");
+
+		if (value == null)
+			return null;
+
+		value = value.trim();
+
+		if (value.isEmpty())
+			return null;
+
+		try {
+			long parsed = Long.parseLong(value, 10);
+			return parsed < 0 ? null : parsed;
+		} catch (NumberFormatException e) {
+			return null;
+		}
+	}
+
+	private boolean hasContentLengthHeader() {
+		Set<@NonNull String> values = getRequest().getHeaders().get("Content-Length");
+		return values != null && !values.isEmpty();
 	}
 
 	private void setCharset(@Nullable Charset charset) {
 		this.charset = charset;
 	}
 
-	@Nonnull
+	@NonNull
+	private Map<@NonNull String, @NonNull Set<@NonNull String>> getQueryParameters() {
+		if (this.queryParameters != null)
+			return this.queryParameters;
+
+		String rawQuery = getRequest().getRawQuery().orElse(null);
+
+		if (rawQuery == null || rawQuery.isEmpty()) {
+			this.queryParameters = Map.of();
+			return this.queryParameters;
+		}
+
+		Charset charset = getEffectiveCharset();
+		Map<@NonNull String, @NonNull Set<@NonNull String>> parsed =
+				Utilities.extractQueryParametersFromQuery(rawQuery, QueryFormat.X_WWW_FORM_URLENCODED, charset);
+		this.queryParameters = Collections.unmodifiableMap(parsed);
+		return this.queryParameters;
+	}
+
+	@NonNull
+	private Map<@NonNull String, @NonNull Set<@NonNull String>> getFormParameters() {
+		if (this.formParameters != null)
+			return this.formParameters;
+
+		if (getRequestReadMethod() != RequestReadMethod.UNSPECIFIED) {
+			this.formParameters = Map.of();
+			return this.formParameters;
+		}
+
+		if (this.contentType == null || !this.contentType.equalsIgnoreCase("application/x-www-form-urlencoded")) {
+			this.formParameters = Map.of();
+			return this.formParameters;
+		}
+
+		markBodyParametersAccessed();
+
+		byte[] body = getRequest().getBody().orElse(null);
+
+		if (body == null || body.length == 0) {
+			this.formParameters = Map.of();
+			return this.formParameters;
+		}
+
+		String bodyAsString = new String(body, StandardCharsets.ISO_8859_1);
+		Charset charset = getEffectiveCharset();
+		Map<@NonNull String, @NonNull Set<@NonNull String>> parsed =
+				Utilities.extractQueryParametersFromQuery(bodyAsString, QueryFormat.X_WWW_FORM_URLENCODED, charset);
+		this.formParameters = Collections.unmodifiableMap(parsed);
+		return this.formParameters;
+	}
+
+	private void markParametersAccessed() {
+		this.parametersAccessed = true;
+	}
+
+	private void markBodyParametersAccessed() {
+		this.bodyParametersAccessed = true;
+	}
+
+	private boolean shouldTrustForwardedHeaders() {
+		if (this.forwardedHeaderTrustPolicy == TrustPolicy.TRUST_ALL)
+			return true;
+
+		if (this.forwardedHeaderTrustPolicy == TrustPolicy.TRUST_NONE)
+			return false;
+
+		if (this.trustedProxyPredicate == null)
+			return false;
+
+		InetSocketAddress remoteAddress = getRequest().getRemoteAddress().orElse(null);
+		return remoteAddress != null && this.trustedProxyPredicate.test(remoteAddress);
+	}
+
+	@Nullable
+	private ForwardedClient extractForwardedClientFromHeaders() {
+		Set<@NonNull String> headerValues = getRequest().getHeaders().get("Forwarded");
+
+		if (headerValues == null)
+			return null;
+
+		for (String headerValue : headerValues) {
+			ForwardedClient candidate = extractForwardedClientFromHeaderValue(headerValue);
+
+			if (candidate != null)
+				return candidate;
+		}
+
+		return null;
+	}
+
+	@Nullable
+	private ForwardedClient extractForwardedClientFromHeaderValue(@Nullable String headerValue) {
+		headerValue = Utilities.trimAggressivelyToNull(headerValue);
+
+		if (headerValue == null)
+			return null;
+
+		for (String forwardedEntry : splitHeaderValueRespectingQuotes(headerValue, ',')) {
+			forwardedEntry = Utilities.trimAggressivelyToNull(forwardedEntry);
+
+			if (forwardedEntry == null)
+				continue;
+
+			for (String component : splitHeaderValueRespectingQuotes(forwardedEntry, ';')) {
+				component = Utilities.trimAggressivelyToNull(component);
+
+				if (component == null)
+					continue;
+
+				String[] nameValue = component.split("=", 2);
+
+				if (nameValue.length != 2)
+					continue;
+
+				String name = Utilities.trimAggressivelyToNull(nameValue[0]);
+
+				if (name == null || !"for".equalsIgnoreCase(name))
+					continue;
+
+				String value = Utilities.trimAggressivelyToNull(nameValue[1]);
+
+				if (value == null)
+					continue;
+
+				value = stripOptionalQuotes(value);
+				value = Utilities.trimAggressivelyToNull(value);
+
+				if (value == null)
+					continue;
+
+				ForwardedClient normalized = parseForwardedForValue(value);
+
+				if (normalized != null)
+					return normalized;
+			}
+		}
+
+		return null;
+	}
+
+	@Nullable
+	private ForwardedClient parseForwardedForValue(@NonNull String value) {
+		requireNonNull(value);
+
+		String normalized = value.trim();
+
+		if (normalized.isEmpty())
+			return null;
+
+		if ("unknown".equalsIgnoreCase(normalized) || normalized.startsWith("_"))
+			return null;
+
+		if (normalized.startsWith("[")) {
+			int close = normalized.indexOf(']');
+
+			if (close > 0) {
+				String host = normalized.substring(1, close);
+
+				if (host.isEmpty())
+					return null;
+
+				Integer port = null;
+				String rest = normalized.substring(close + 1).trim();
+
+				if (!rest.isEmpty()) {
+					if (!rest.startsWith(":"))
+						return null;
+
+					String portToken = Utilities.trimAggressivelyToNull(rest.substring(1));
+
+					if (portToken != null) {
+						try {
+							port = Integer.parseInt(portToken, 10);
+						} catch (Exception ignored) {
+							// Ignore invalid port.
+						}
+					}
+				}
+
+				return new ForwardedClient(host, port);
+			}
+
+			return null;
+		}
+
+		int colonCount = 0;
+
+		for (int i = 0; i < normalized.length(); i++) {
+			if (normalized.charAt(i) == ':')
+				colonCount++;
+		}
+
+		if (colonCount == 0)
+			return new ForwardedClient(normalized, null);
+
+		if (colonCount == 1) {
+			int colon = normalized.indexOf(':');
+			String host = normalized.substring(0, colon).trim();
+
+			if (host.isEmpty())
+				return null;
+
+			String portToken = Utilities.trimAggressivelyToNull(normalized.substring(colon + 1));
+			Integer port = null;
+
+			if (portToken != null) {
+				try {
+					port = Integer.parseInt(portToken, 10);
+				} catch (Exception ignored) {
+					// Ignore invalid port.
+				}
+			}
+
+			return new ForwardedClient(host, port);
+		}
+
+		return new ForwardedClient(normalized, null);
+	}
+
+	@Nullable
+	private ForwardedClient extractXForwardedClientFromHeaders() {
+		Set<@NonNull String> headerValues = getRequest().getHeaders().get("X-Forwarded-For");
+
+		if (headerValues == null)
+			return null;
+
+		for (String headerValue : headerValues) {
+			if (headerValue == null)
+				continue;
+
+			String[] components = headerValue.split(",");
+
+			for (String component : components) {
+				String value = Utilities.trimAggressivelyToNull(component);
+
+				if (value != null) {
+					value = stripOptionalQuotes(value);
+					value = Utilities.trimAggressivelyToNull(value);
+
+					if (value != null) {
+						ForwardedClient normalized = parseForwardedForValue(value);
+
+						if (normalized != null)
+							return normalized;
+					}
+				}
+			}
+		}
+
+		return null;
+	}
+
+	private static final class ForwardedClient {
+		@NonNull
+		private final String host;
+		@Nullable
+		private final Integer port;
+
+		private ForwardedClient(@NonNull String host,
+														@Nullable Integer port) {
+			this.host = requireNonNull(host);
+			this.port = port;
+		}
+
+		@NonNull
+		private String getHost() {
+			return this.host;
+		}
+
+		@Nullable
+		private Integer getPort() {
+			return this.port;
+		}
+	}
+
+	private static final class SokletServletConnection implements ServletConnection {
+		@NonNull
+		private final String connectionId;
+		@NonNull
+		private final String protocol;
+		@NonNull
+		private final String protocolConnectionId;
+		private final boolean secure;
+
+		private SokletServletConnection(@NonNull String connectionId,
+																		@NonNull String protocol,
+																		@NonNull String protocolConnectionId,
+																		boolean secure) {
+			this.connectionId = requireNonNull(connectionId);
+			this.protocol = requireNonNull(protocol);
+			this.protocolConnectionId = requireNonNull(protocolConnectionId);
+			this.secure = secure;
+		}
+
+		@Override
+		@NonNull
+		public String getConnectionId() {
+			return this.connectionId;
+		}
+
+		@Override
+		@NonNull
+		public String getProtocol() {
+			return this.protocol;
+		}
+
+		@Override
+		@NonNull
+		public String getProtocolConnectionId() {
+			return this.protocolConnectionId;
+		}
+
+		@Override
+		public boolean isSecure() {
+			return this.secure;
+		}
+	}
+
+	@NonNull
 	private Optional<String> getHost() {
 		return Optional.ofNullable(this.host);
 	}
 
-	@Nonnull
+	@NonNull
 	private Optional<Integer> getPort() {
 		return Optional.ofNullable(this.port);
+	}
+
+	@NonNull
+	private ServletConnection buildServletConnection() {
+		String connectionId = buildConnectionId();
+		String protocol = normalizeConnectionProtocol(getProtocol());
+		boolean secure = "https".equalsIgnoreCase(getScheme());
+		return new SokletServletConnection(connectionId, protocol, "", secure);
+	}
+
+	@NonNull
+	private String buildConnectionId() {
+		InetSocketAddress remoteAddress = getRequest().getRemoteAddress().orElse(null);
+
+		if (remoteAddress == null)
+			return UUID.randomUUID().toString();
+
+		InetAddress address = remoteAddress.getAddress();
+		String host = address == null ? remoteAddress.getHostString() : address.getHostAddress();
+
+		if (host == null || host.isBlank())
+			return UUID.randomUUID().toString();
+
+		return host + ":" + remoteAddress.getPort();
+	}
+
+	@NonNull
+	private String normalizeConnectionProtocol(@Nullable String protocol) {
+		if (protocol == null || protocol.isBlank())
+			return "unknown";
+
+		String normalized = protocol.trim().toLowerCase(ROOT);
+
+		if ("http/2".equals(normalized) || "http/2.0".equals(normalized))
+			return "h2";
+
+		if ("http/3".equals(normalized) || "http/3.0".equals(normalized))
+			return "h3";
+
+		if (normalized.startsWith("http/"))
+			return normalized;
+
+		return "unknown";
+	}
+
+	@NonNull
+	private Optional<String> getEffectiveOrigin() {
+		EffectiveOriginResolver resolver = EffectiveOriginResolver.withRequest(
+				getRequest(),
+				this.forwardedHeaderTrustPolicy
+		);
+
+		if (this.trustedProxyPredicate != null)
+			resolver.trustedProxyPredicate(this.trustedProxyPredicate);
+
+		if (this.allowOriginFallback != null)
+			resolver.allowOriginFallback(this.allowOriginFallback);
+
+		return Utilities.extractEffectiveOrigin(resolver);
+	}
+
+	@NonNull
+	private Optional<URI> getEffectiveOriginUri() {
+		String effectiveOrigin = getEffectiveOrigin().orElse(null);
+
+		if (effectiveOrigin == null)
+			return Optional.empty();
+
+		try {
+			return Optional.of(URI.create(effectiveOrigin));
+		} catch (Exception ignored) {
+			return Optional.empty();
+		}
+	}
+
+	private int defaultPortForScheme(@Nullable String scheme) {
+		if (scheme == null)
+			return 0;
+
+		if ("https".equalsIgnoreCase(scheme))
+			return 443;
+
+		if ("http".equalsIgnoreCase(scheme))
+			return 80;
+
+		return 0;
+	}
+
+	@NonNull
+	private String stripIpv6Brackets(@NonNull String host) {
+		requireNonNull(host);
+
+		if (host.startsWith("[") && host.endsWith("]") && host.length() > 2)
+			return host.substring(1, host.length() - 1);
+
+		return host;
+	}
+
+	private boolean isIpv4Literal(@NonNull String value) {
+		requireNonNull(value);
+		String[] parts = value.split("\\.", -1);
+
+		if (parts.length != 4)
+			return false;
+
+		for (String part : parts) {
+			if (part.isEmpty())
+				return false;
+
+			int acc = 0;
+
+			for (int i = 0; i < part.length(); i++) {
+				char c = part.charAt(i);
+				if (c < '0' || c > '9')
+					return false;
+				acc = acc * 10 + (c - '0');
+				if (acc > 255)
+					return false;
+			}
+		}
+
+		return true;
+	}
+
+	private boolean isIpv6Literal(@NonNull String value) {
+		requireNonNull(value);
+		return value.indexOf(':') >= 0;
+	}
+
+	@Nullable
+	private String hostFromAuthority(@Nullable String authority) {
+		if (authority == null)
+			return null;
+
+		String normalized = authority.trim();
+
+		if (normalized.isEmpty())
+			return null;
+
+		int at = normalized.lastIndexOf('@');
+
+		if (at >= 0)
+			normalized = normalized.substring(at + 1);
+
+		if (normalized.startsWith("[")) {
+			int close = normalized.indexOf(']');
+
+			if (close > 0)
+				return normalized.substring(1, close);
+
+			return null;
+		}
+
+		int colon = normalized.indexOf(':');
+		return colon > 0 ? normalized.substring(0, colon) : normalized;
+	}
+
+	@Nullable
+	private Integer portFromAuthority(@Nullable String authority) {
+		if (authority == null)
+			return null;
+
+		String normalized = authority.trim();
+
+		if (normalized.isEmpty())
+			return null;
+
+		int at = normalized.lastIndexOf('@');
+
+		if (at >= 0)
+			normalized = normalized.substring(at + 1);
+
+		if (normalized.startsWith("[")) {
+			int close = normalized.indexOf(']');
+
+			if (close > 0 && normalized.length() > close + 1 && normalized.charAt(close + 1) == ':') {
+				String portString = normalized.substring(close + 2).trim();
+
+				try {
+					return Integer.parseInt(portString, 10);
+				} catch (Exception ignored) {
+					return null;
+				}
+			}
+
+			return null;
+		}
+
+		int colon = normalized.indexOf(':');
+
+		if (colon > 0 && normalized.indexOf(':', colon + 1) == -1) {
+			String portString = normalized.substring(colon + 1).trim();
+
+			try {
+				return Integer.parseInt(portString, 10);
+			} catch (Exception ignored) {
+				return null;
+			}
+		}
+
+		return null;
+	}
+
+	@NonNull
+	private Optional<SokletServletInputStream> getServletInputStream() {
+		return Optional.ofNullable(this.servletInputStream);
+	}
+
+	private void setServletInputStream(@Nullable SokletServletInputStream servletInputStream) {
+		this.servletInputStream = servletInputStream;
+	}
+
+	@NonNull
+	private Optional<BufferedReader> getBufferedReader() {
+		return Optional.ofNullable(this.reader);
+	}
+
+	private void setBufferedReader(@Nullable BufferedReader reader) {
+		this.reader = reader;
+	}
+
+	@NonNull
+	private RequestReadMethod getRequestReadMethod() {
+		return this.requestReadMethod;
+	}
+
+	private void setRequestReadMethod(@NonNull RequestReadMethod requestReadMethod) {
+		requireNonNull(requestReadMethod);
+		this.requestReadMethod = requestReadMethod;
+	}
+
+	private enum RequestReadMethod {
+		UNSPECIFIED,
+		INPUT_STREAM,
+		READER
 	}
 
 	/**
@@ -240,7 +1082,7 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	 */
 	@NotThreadSafe
 	public static class Builder {
-		@Nonnull
+		@NonNull
 		private Request request;
 		@Nullable
 		private Integer port;
@@ -250,46 +1092,92 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		private ServletContext servletContext;
 		@Nullable
 		private HttpSession httpSession;
+		@NonNull
+		private TrustPolicy forwardedHeaderTrustPolicy;
+		@Nullable
+		private Predicate<@NonNull InetSocketAddress> trustedProxyPredicate;
+		@Nullable
+		private Boolean allowOriginFallback;
 
-		@Nonnull
-		private Builder(@Nonnull Request request) {
+		@NonNull
+		private Builder(@NonNull Request request) {
 			requireNonNull(request);
 			this.request = request;
+			this.forwardedHeaderTrustPolicy = TrustPolicy.TRUST_NONE;
 		}
 
-		@Nonnull
-		public Builder request(@Nonnull Request request) {
+		@NonNull
+		public Builder request(@NonNull Request request) {
 			requireNonNull(request);
 			this.request = request;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public Builder host(@Nullable String host) {
 			this.host = host;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public Builder port(@Nullable Integer port) {
 			this.port = port;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public Builder servletContext(@Nullable ServletContext servletContext) {
 			this.servletContext = servletContext;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public Builder httpSession(@Nullable HttpSession httpSession) {
 			this.httpSession = httpSession;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
+		public Builder forwardedHeaderTrustPolicy(@NonNull TrustPolicy forwardedHeaderTrustPolicy) {
+			requireNonNull(forwardedHeaderTrustPolicy);
+			this.forwardedHeaderTrustPolicy = forwardedHeaderTrustPolicy;
+			return this;
+		}
+
+		@NonNull
+		public Builder trustedProxyPredicate(@Nullable Predicate<@NonNull InetSocketAddress> trustedProxyPredicate) {
+			this.trustedProxyPredicate = trustedProxyPredicate;
+			return this;
+		}
+
+		@NonNull
+		public Builder trustedProxyAddresses(@NonNull Set<@NonNull InetAddress> trustedProxyAddresses) {
+			requireNonNull(trustedProxyAddresses);
+			Set<@NonNull InetAddress> normalizedAddresses = Set.copyOf(trustedProxyAddresses);
+			this.trustedProxyPredicate = remoteAddress -> {
+				if (remoteAddress == null)
+					return false;
+
+				InetAddress address = remoteAddress.getAddress();
+				return address != null && normalizedAddresses.contains(address);
+			};
+			return this;
+		}
+
+		@NonNull
+		public Builder allowOriginFallback(@Nullable Boolean allowOriginFallback) {
+			this.allowOriginFallback = allowOriginFallback;
+			return this;
+		}
+
+		@NonNull
 		public SokletHttpServletRequest build() {
+			if (this.forwardedHeaderTrustPolicy == TrustPolicy.TRUST_PROXY_ALLOWLIST
+					&& this.trustedProxyPredicate == null) {
+				throw new IllegalStateException(format("%s policy requires a trusted proxy predicate or allowlist.",
+						TrustPolicy.TRUST_PROXY_ALLOWLIST));
+			}
+
 			return new SokletHttpServletRequest(this);
 		}
 	}
@@ -326,9 +1214,8 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
-	public Cookie[] getCookies() {
-		return this.cookies.toArray(new Cookie[0]);
+	public @NonNull Cookie @Nullable [] getCookies() {
+		return this.cookies.isEmpty() ? null : this.cookies.toArray(new Cookie[0]);
 	}
 
 	@Override
@@ -367,22 +1254,27 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		if (name == null)
 			return null;
 
-		return getRequest().getHeader(name).orElse(null);
+		Set<@NonNull String> values = getRequest().getHeaders().get(name);
+
+		if (values == null || values.isEmpty())
+			return null;
+
+		return values.iterator().next();
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getHeaders(@Nullable String name) {
+	@NonNull
+	public Enumeration<@NonNull String> getHeaders(@Nullable String name) {
 		if (name == null)
 			return Collections.emptyEnumeration();
 
-		Set<String> values = request.getHeaders().get(name);
+		Set<@NonNull String> values = request.getHeaders().get(name);
 		return values == null ? Collections.emptyEnumeration() : Collections.enumeration(values);
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getHeaderNames() {
+	@NonNull
+	public Enumeration<@NonNull String> getHeaderNames() {
 		return Collections.enumeration(getRequest().getHeaders().keySet());
 	}
 
@@ -401,7 +1293,7 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getMethod() {
 		return getRequest().getHttpMethod().name();
 	}
@@ -415,11 +1307,11 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	@Override
 	@Nullable
 	public String getPathTranslated() {
-		return getRequest().getPath();
+		return null;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getContextPath() {
 		return "";
 	}
@@ -450,39 +1342,142 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		return null;
 	}
 
-	@Override
 	@Nullable
-	public String getRequestedSessionId() {
-		// This is legal according to spec
+	private String extractRequestedSessionIdFromCookie() {
+		for (Cookie cookie : this.cookies) {
+			String name = cookie.getName();
+
+			if (name != null && SESSION_COOKIE_NAME.equalsIgnoreCase(name)) {
+				String value = cookie.getValue();
+
+				if (value != null && !value.isEmpty())
+					return value;
+			}
+		}
+
+		return null;
+	}
+
+	@Nullable
+	private String extractRequestedSessionIdFromUrl() {
+		String rawPath = getRequest().getRawPath();
+		int length = rawPath.length();
+		int index = 0;
+
+		while (index < length) {
+			int semicolon = rawPath.indexOf(';', index);
+
+			if (semicolon < 0)
+				break;
+
+			int nameStart = semicolon + 1;
+
+			if (nameStart >= length)
+				break;
+
+			int nameEnd = nameStart;
+
+			while (nameEnd < length) {
+				char ch = rawPath.charAt(nameEnd);
+
+				if (ch == '=' || ch == ';' || ch == '/')
+					break;
+
+				nameEnd++;
+			}
+
+			if (nameEnd == nameStart) {
+				index = nameEnd + 1;
+				continue;
+			}
+
+			String name = rawPath.substring(nameStart, nameEnd);
+
+			if (!SESSION_URL_PARAM.equalsIgnoreCase(name)) {
+				index = nameEnd + 1;
+				continue;
+			}
+
+			if (nameEnd >= length || rawPath.charAt(nameEnd) != '=') {
+				index = nameEnd + 1;
+				continue;
+			}
+
+			int valueStart = nameEnd + 1;
+			int valueEnd = valueStart;
+
+			while (valueEnd < length) {
+				char ch = rawPath.charAt(valueEnd);
+
+				if (ch == ';' || ch == '/')
+					break;
+
+				valueEnd++;
+			}
+
+			if (valueEnd == valueStart) {
+				index = valueEnd + 1;
+				continue;
+			}
+
+			String value = rawPath.substring(valueStart, valueEnd);
+
+			if (!value.isEmpty())
+				return value;
+
+			index = valueEnd + 1;
+		}
+
 		return null;
 	}
 
 	@Override
-	@Nonnull
-	public String getRequestURI() {
-		return getRequest().getPath();
+	@Nullable
+	public String getRequestedSessionId() {
+		String cookieSessionId = extractRequestedSessionIdFromCookie();
+
+		if (cookieSessionId != null)
+			return cookieSessionId;
+
+		return extractRequestedSessionIdFromUrl();
 	}
 
 	@Override
-	@Nonnull
-	public StringBuffer getRequestURL() {
-		// Try forwarded/synthesized absolute prefix first
-		String clientUrlPrefix = Utilities.extractClientUrlPrefixFromHeaders(getRequest().getHeaders()).orElse(null);
+	@NonNull
+	public String getRequestURI() {
+		return getRequest().getRawPath();
+	}
 
-		if (clientUrlPrefix != null)
-			return new StringBuffer(format("%s%s", clientUrlPrefix, getRequest().getPath()));
+	@Override
+	@NonNull
+	public StringBuffer getRequestURL() {
+		String rawPath = getRequest().getRawPath();
+
+		if ("*".equals(rawPath))
+			return new StringBuffer(rawPath);
+
+		// Try forwarded/synthesized absolute prefix first
+		String effectiveOrigin = getEffectiveOrigin().orElse(null);
+
+		if (effectiveOrigin != null)
+			return new StringBuffer(format("%s%s", effectiveOrigin, rawPath));
 
 		// Fall back to builder-provided host/port when available
 		String scheme = getScheme(); // Soklet returns "http" by design
 		String host = getServerName();
-		int port = getServerPort(); // may throw if not initialized by builder
-		boolean defaultPort = ("https".equalsIgnoreCase(scheme) && port == 443) || ("http".equalsIgnoreCase(scheme) && port == 80);
-		String authority = defaultPort ? host : format("%s:%d", host, port);
-		return new StringBuffer(format("%s://%s%s", scheme, authority, getRequest().getPath()));
+		int port = getServerPort();
+		boolean defaultPort = port <= 0 || ("https".equalsIgnoreCase(scheme) && port == 443) || ("http".equalsIgnoreCase(scheme) && port == 80);
+		String authorityHost = host;
+
+		if (host != null && host.indexOf(':') >= 0 && !host.startsWith("[") && !host.endsWith("]"))
+			authorityHost = "[" + host + "]";
+
+		String authority = defaultPort ? authorityHost : format("%s:%d", authorityHost, port);
+		return new StringBuffer(format("%s://%s%s", scheme, authority, rawPath));
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getServletPath() {
 		// This is legal according to spec
 		return "";
@@ -492,30 +1487,41 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	@Nullable
 	public HttpSession getSession(boolean create) {
 		HttpSession currentHttpSession = getHttpSession().orElse(null);
+		boolean createdNow = false;
 
 		if (create && currentHttpSession == null) {
-			currentHttpSession = SokletHttpSession.withServletContext(getServletContext());
+			currentHttpSession = SokletHttpSession.fromServletContext(getServletContext());
 			setHttpSession(currentHttpSession);
+			this.sessionCreated = true;
+			createdNow = true;
 		}
+
+		if (currentHttpSession != null)
+			touchSession(currentHttpSession, createdNow);
 
 		return currentHttpSession;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public HttpSession getSession() {
 		HttpSession currentHttpSession = getHttpSession().orElse(null);
+		boolean createdNow = false;
 
 		if (currentHttpSession == null) {
-			currentHttpSession = SokletHttpSession.withServletContext(getServletContext());
+			currentHttpSession = SokletHttpSession.fromServletContext(getServletContext());
 			setHttpSession(currentHttpSession);
+			this.sessionCreated = true;
+			createdNow = true;
 		}
+
+		touchSession(currentHttpSession, createdNow);
 
 		return currentHttpSession;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String changeSessionId() {
 		HttpSession currentHttpSession = getHttpSession().orElse(null);
 
@@ -533,24 +1539,39 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 
 	@Override
 	public boolean isRequestedSessionIdValid() {
-		// This is legal according to spec
-		return false;
+		String requestedSessionId = getRequestedSessionId();
+
+		if (requestedSessionId == null)
+			return false;
+
+		HttpSession currentSession = getHttpSession().orElse(null);
+
+		if (currentSession == null)
+			return false;
+
+		return requestedSessionId.equals(currentSession.getId());
 	}
 
 	@Override
 	public boolean isRequestedSessionIdFromCookie() {
-		// This is legal according to spec
-		return false;
+		return extractRequestedSessionIdFromCookie() != null;
 	}
 
 	@Override
 	public boolean isRequestedSessionIdFromURL() {
-		// This is legal according to spec
-		return false;
+		if (extractRequestedSessionIdFromCookie() != null)
+			return false;
+
+		return extractRequestedSessionIdFromUrl() != null;
+	}
+
+	@Deprecated
+	public boolean isRequestedSessionIdFromUrl() {
+		return isRequestedSessionIdFromURL();
 	}
 
 	@Override
-	public boolean authenticate(@Nonnull HttpServletResponse httpServletResponse) throws IOException, ServletException {
+	public boolean authenticate(@NonNull HttpServletResponse httpServletResponse) throws IOException, ServletException {
 		requireNonNull(httpServletResponse);
 		// TODO: perhaps revisit this in the future
 		throw new ServletException("Authentication is not supported");
@@ -570,11 +1591,11 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
-	public Collection<Part> getParts() throws IOException, ServletException {
+	@NonNull
+	public Collection<@NonNull Part> getParts() throws IOException, ServletException {
 		// Legal if the request body is larger than maxRequestSize, or any Part in the request is larger than maxFileSize,
 		// or there is no @MultipartConfig or multipart-config in deployment descriptors
-		throw new IllegalStateException("Servlet multipart configuration is not supported");
+		throw new ServletException("Servlet multipart configuration is not supported");
 	}
 
 	@Override
@@ -582,11 +1603,11 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	public Part getPart(@Nullable String name) throws IOException, ServletException {
 		// Legal if the request body is larger than maxRequestSize, or any Part in the request is larger than maxFileSize,
 		// or there is no @MultipartConfig or multipart-config in deployment descriptors
-		throw new IllegalStateException("Servlet multipart configuration is not supported");
+		throw new ServletException("Servlet multipart configuration is not supported");
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public <T extends HttpUpgradeHandler> T upgrade(@Nullable Class<T> handlerClass) throws IOException, ServletException {
 		// Legal if the given handlerClass fails to be instantiated
 		throw new ServletException("HTTP upgrade is not supported");
@@ -602,23 +1623,30 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getAttributeNames() {
+	@NonNull
+	public Enumeration<@NonNull String> getAttributeNames() {
 		return Collections.enumeration(getAttributes().keySet());
 	}
 
 	@Override
-	@Nonnull
+	@Nullable
 	public String getCharacterEncoding() {
-		Charset charset = getCharset().orElse(null);
-		return charset == null ? null : charset.name();
+		Charset explicit = getCharset().orElse(null);
+
+		if (explicit != null)
+			return explicit.name();
+
+		Charset context = getContextRequestCharset();
+		return context == null ? null : context.name();
 	}
 
 	@Override
 	public void setCharacterEncoding(@Nullable String env) throws UnsupportedEncodingException {
 		// Note that spec says: "This method must be called prior to reading request parameters or
 		// reading input using getReader(). Otherwise, it has no effect."
-		// ...but we don't need to care about this because Soklet requests are byte arrays of finite size, not streams
+		if (this.parametersAccessed || getRequestReadMethod() != RequestReadMethod.UNSPECIFIED)
+			return;
+
 		if (env == null) {
 			setCharset(null);
 		} else {
@@ -628,57 +1656,101 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 				throw new UnsupportedEncodingException(format("Not sure how to handle character encoding '%s'", env));
 			}
 		}
+
+		this.queryParameters = null;
+		this.formParameters = null;
 	}
 
 	@Override
 	public int getContentLength() {
-		byte[] body = request.getBody().orElse(null);
-		return body == null ? 0 : body.length;
+		Long length = getContentLengthHeaderValue();
+
+		if (length != null) {
+			if (length > Integer.MAX_VALUE)
+				return -1;
+
+			return length.intValue();
+		}
+
+		if (hasContentLengthHeader())
+			return -1;
+
+		byte[] body = getRequest().getBody().orElse(null);
+
+		if (body == null || body.length > Integer.MAX_VALUE)
+			return -1;
+
+		return body.length;
 	}
 
 	@Override
 	public long getContentLengthLong() {
-		byte[] body = request.getBody().orElse(null);
-		return body == null ? 0 : body.length;
+		Long length = getContentLengthHeaderValue();
+
+		if (length != null)
+			return length;
+
+		if (hasContentLengthHeader())
+			return -1;
+
+		byte[] body = getRequest().getBody().orElse(null);
+		return body == null ? -1 : body.length;
 	}
 
 	@Override
 	@Nullable
 	public String getContentType() {
-		return this.contentType;
+		String headerValue = getHeader("Content-Type");
+		return headerValue != null ? headerValue : this.contentType;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ServletInputStream getInputStream() throws IOException {
-		byte[] body = getRequest().getBody().orElse(new byte[]{});
-		return SokletServletInputStream.withInputStream(new ByteArrayInputStream(body));
+		RequestReadMethod currentReadMethod = getRequestReadMethod();
+
+		if (currentReadMethod == RequestReadMethod.UNSPECIFIED) {
+			setRequestReadMethod(RequestReadMethod.INPUT_STREAM);
+			byte[] body = this.bodyParametersAccessed ? new byte[]{} : getRequest().getBody().orElse(new byte[]{});
+			setServletInputStream(SokletServletInputStream.fromInputStream(new ByteArrayInputStream(body)));
+			return getServletInputStream().get();
+		} else if (currentReadMethod == RequestReadMethod.INPUT_STREAM) {
+			return getServletInputStream().get();
+		} else {
+			throw new IllegalStateException("getReader() has already been called for this request");
+		}
 	}
 
 	@Override
 	@Nullable
 	public String getParameter(@Nullable String name) {
-		String value = null;
+		if (name == null)
+			return null;
 
-		// First, check query parameters.
-		if (getRequest().getQueryParameters().keySet().contains(name)) {
-			// If there is a query parameter with the given name, return it
-			value = getRequest().getQueryParameter(name).orElse(null);
-		} else if (getRequest().getFormParameters().keySet().contains(name)) {
-			// Otherwise, check form parameters in request body
-			value = getRequest().getFormParameter(name).orElse(null);
-		}
+		markParametersAccessed();
 
-		return value;
+		Set<@NonNull String> queryValues = getQueryParameters().get(name);
+
+		if (queryValues != null && !queryValues.isEmpty())
+			return queryValues.iterator().next();
+
+		Set<@NonNull String> formValues = getFormParameters().get(name);
+
+		if (formValues != null && !formValues.isEmpty())
+			return formValues.iterator().next();
+
+		return null;
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getParameterNames() {
-		Set<String> queryParameterNames = getRequest().getQueryParameters().keySet();
-		Set<String> formParameterNames = getRequest().getFormParameters().keySet();
+	@NonNull
+	public Enumeration<@NonNull String> getParameterNames() {
+		markParametersAccessed();
 
-		Set<String> parameterNames = new HashSet<>(queryParameterNames.size() + formParameterNames.size());
+		Set<@NonNull String> queryParameterNames = getQueryParameters().keySet();
+		Set<@NonNull String> formParameterNames = getFormParameters().keySet();
+
+		Set<@NonNull String> parameterNames = new LinkedHashSet<>(queryParameterNames.size() + formParameterNames.size());
 		parameterNames.addAll(queryParameterNames);
 		parameterNames.addAll(formParameterNames);
 
@@ -686,19 +1758,20 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nullable
-	public String[] getParameterValues(@Nullable String name) {
+	public @NonNull String @Nullable [] getParameterValues(@Nullable String name) {
 		if (name == null)
 			return null;
 
-		List<String> parameterValues = new ArrayList<>();
+		markParametersAccessed();
 
-		Set<String> queryValues = getRequest().getQueryParameters().get(name);
+		List<@NonNull String> parameterValues = new ArrayList<>();
+
+		Set<@NonNull String> queryValues = getQueryParameters().get(name);
 
 		if (queryValues != null)
 			parameterValues.addAll(queryValues);
 
-		Set<String> formValues = getRequest().getFormParameters().get(name);
+		Set<@NonNull String> formValues = getFormParameters().get(name);
 
 		if (formValues != null)
 			parameterValues.addAll(formValues);
@@ -707,191 +1780,178 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
-	public Map<String, String[]> getParameterMap() {
-		Map<String, Set<String>> parameterMap = new HashMap<>();
+	@NonNull
+	public Map<@NonNull String, @NonNull String @NonNull []> getParameterMap() {
+		markParametersAccessed();
+
+		Map<@NonNull String, @NonNull Set<@NonNull String>> parameterMap = new LinkedHashMap<>();
 
 		// Mutable copy of entries
-		for (Entry<String, Set<String>> entry : getRequest().getQueryParameters().entrySet())
-			parameterMap.put(entry.getKey(), new HashSet<>(entry.getValue()));
+		for (Entry<@NonNull String, @NonNull Set<@NonNull String>> entry : getQueryParameters().entrySet())
+			parameterMap.put(entry.getKey(), new LinkedHashSet<>(entry.getValue()));
 
 		// Add form parameters to entries
-		for (Entry<String, Set<String>> entry : getRequest().getFormParameters().entrySet()) {
-			Set<String> existingEntries = parameterMap.get(entry.getKey());
+		for (Entry<@NonNull String, @NonNull Set<@NonNull String>> entry : getFormParameters().entrySet()) {
+			Set<@NonNull String> existingEntries = parameterMap.get(entry.getKey());
 
 			if (existingEntries != null)
 				existingEntries.addAll(entry.getValue());
 			else
-				parameterMap.put(entry.getKey(), entry.getValue());
+				parameterMap.put(entry.getKey(), new LinkedHashSet<>(entry.getValue()));
 		}
 
-		Map<String, String[]> finalParameterMap = new HashMap<>();
+		Map<@NonNull String, @NonNull String @NonNull []> finalParameterMap = new LinkedHashMap<>();
 
-		for (Entry<String, Set<String>> entry : parameterMap.entrySet())
+		for (Entry<@NonNull String, @NonNull Set<@NonNull String>> entry : parameterMap.entrySet())
 			finalParameterMap.put(entry.getKey(), entry.getValue().toArray(new String[0]));
 
 		return Collections.unmodifiableMap(finalParameterMap);
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getProtocol() {
 		return "HTTP/1.1";
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getScheme() {
-		// Honor common reverse-proxy header; fall back to http
-		String proto = getRequest().getHeader("X-Forwarded-Proto").orElse(null);
+		URI effectiveOriginUri = getEffectiveOriginUri().orElse(null);
 
-		if (proto != null) {
-			proto = proto.trim().toLowerCase(ROOT);
-			if (proto.equals("https") || proto.equals("http"))
-				return proto;
+		if (effectiveOriginUri != null && effectiveOriginUri.getScheme() != null)
+			return effectiveOriginUri.getScheme().trim().toLowerCase(ROOT);
+
+		// Honor common reverse-proxy header only when trusted; fall back to http
+		if (shouldTrustForwardedHeaders()) {
+			String proto = getRequest().getHeader("X-Forwarded-Proto").orElse(null);
+
+			if (proto != null) {
+				proto = proto.trim().toLowerCase(ROOT);
+				if (proto.equals("https") || proto.equals("http"))
+					return proto;
+			}
 		}
 
 		return "http";
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getServerName() {
-		// Path only (no query parameters) preceded by remote protocol, host, and port (if available)
-		// e.g. https://www.soklet.com/test/abc
-		String clientUrlPrefix = Utilities.extractClientUrlPrefixFromHeaders(getRequest().getHeaders()).orElse(null);
+		URI effectiveOriginUri = getEffectiveOriginUri().orElse(null);
 
-		if (clientUrlPrefix == null)
-			return getLocalName();
+		if (effectiveOriginUri != null) {
+			String host = effectiveOriginUri.getHost();
 
-		clientUrlPrefix = clientUrlPrefix.toLowerCase(ROOT);
+			if (host == null)
+				host = hostFromAuthority(effectiveOriginUri.getAuthority());
 
-		// Remove protocol prefix
-		if (clientUrlPrefix.startsWith("https://"))
-			clientUrlPrefix = clientUrlPrefix.replace("https://", "");
-		else if (clientUrlPrefix.startsWith("http://"))
-			clientUrlPrefix = clientUrlPrefix.replace("http://", "");
+			if (host != null) {
+				if (host.startsWith("[") && host.endsWith("]") && host.length() > 2)
+					host = host.substring(1, host.length() - 1);
 
-		// Remove "/" and anything after it
-		int indexOfFirstSlash = clientUrlPrefix.indexOf("/");
+				return host;
+			}
+		}
 
-		if (indexOfFirstSlash != -1)
-			clientUrlPrefix = clientUrlPrefix.substring(0, indexOfFirstSlash);
+		String hostHeader = getRequest().getHeader("Host").orElse(null);
 
-		// Remove ":" and anything after it (port)
-		int indexOfColon = clientUrlPrefix.indexOf(":");
+		if (hostHeader != null) {
+			String host = hostFromAuthority(hostHeader);
 
-		if (indexOfColon != -1)
-			clientUrlPrefix = clientUrlPrefix.substring(0, indexOfColon);
+			if (host != null && !host.isBlank())
+				return host;
+		}
 
-		return clientUrlPrefix;
+		return getLocalName();
 	}
 
 	@Override
 	public int getServerPort() {
-		// Path only (no query parameters) preceded by remote protocol, host, and port (if available)
-		// e.g. https://www.soklet.com/test/abc
-		String clientUrlPrefix = Utilities.extractClientUrlPrefixFromHeaders(getRequest().getHeaders()).orElse(null);
+		URI effectiveOriginUri = getEffectiveOriginUri().orElse(null);
 
-		if (clientUrlPrefix == null)
-			return getLocalPort();
+		if (effectiveOriginUri != null) {
+			int port = effectiveOriginUri.getPort();
+			if (port >= 0)
+				return port;
 
-		clientUrlPrefix = clientUrlPrefix.toLowerCase(ROOT);
+			Integer authorityPort = portFromAuthority(effectiveOriginUri.getAuthority());
 
-		boolean https = false;
+			if (authorityPort != null)
+				return authorityPort;
 
-		// Remove protocol prefix
-		if (clientUrlPrefix.startsWith("https://")) {
-			clientUrlPrefix = clientUrlPrefix.replace("https://", "");
-			https = true;
-		} else if (clientUrlPrefix.startsWith("http://")) {
-			clientUrlPrefix = clientUrlPrefix.replace("http://", "");
+			return defaultPortForScheme(effectiveOriginUri.getScheme());
 		}
 
-		// Remove "/" and anything after it
-		int indexOfFirstSlash = clientUrlPrefix.indexOf("/");
+		String hostHeader = getRequest().getHeader("Host").orElse(null);
 
-		if (indexOfFirstSlash != -1)
-			clientUrlPrefix = clientUrlPrefix.substring(0, indexOfFirstSlash);
+		if (hostHeader != null) {
+			Integer hostPort = portFromAuthority(hostHeader);
 
-		String[] hostAndPortComponents = clientUrlPrefix.split(":");
-
-		// No explicit port?  Look at protocol for guidance
-		if (hostAndPortComponents.length == 1)
-			return https ? 443 : 80;
-
-		try {
-			return Integer.parseInt(hostAndPortComponents[1], 10);
-		} catch (Exception ignored) {
-			return getLocalPort();
+			if (hostPort != null)
+				return hostPort;
 		}
+
+		Integer port = getPort().orElse(null);
+
+		if (port != null)
+			return port;
+
+		int defaultPort = defaultPortForScheme(getScheme());
+		return defaultPort > 0 ? defaultPort : 0;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public BufferedReader getReader() throws IOException {
-		Charset charset = getCharset().orElse(DEFAULT_CHARSET);
-		InputStream inputStream = new ByteArrayInputStream(getRequest().getBody().orElse(new byte[0]));
-		return new BufferedReader(new InputStreamReader(inputStream, charset));
+		RequestReadMethod currentReadMethod = getRequestReadMethod();
+
+		if (currentReadMethod == RequestReadMethod.UNSPECIFIED) {
+			setRequestReadMethod(RequestReadMethod.READER);
+			Charset charset = getEffectiveCharset();
+			byte[] body = this.bodyParametersAccessed ? new byte[]{} : getRequest().getBody().orElse(new byte[0]);
+			InputStream inputStream = new ByteArrayInputStream(body);
+			setBufferedReader(new BufferedReader(new InputStreamReader(inputStream, charset)));
+			return getBufferedReader().get();
+		} else if (currentReadMethod == RequestReadMethod.READER) {
+			return getBufferedReader().get();
+		} else {
+			throw new IllegalStateException("getInputStream() has already been called for this request");
+		}
 	}
 
 	@Override
 	@Nullable
 	public String getRemoteAddr() {
-		String xForwardedForHeader = getRequest().getHeader("X-Forwarded-For").orElse(null);
+		if (shouldTrustForwardedHeaders()) {
+			ForwardedClient forwardedFor = extractForwardedClientFromHeaders();
 
-		if (xForwardedForHeader == null)
-			return null;
+			if (forwardedFor != null)
+				return forwardedFor.getHost();
 
-		// Example value: 203.0.113.195,2001:db8:85a3:8d3:1319:8a2e:370:7348,198.51.100.178
-		String[] components = xForwardedForHeader.split(",");
+			ForwardedClient xForwardedFor = extractXForwardedClientFromHeaders();
 
-		if (components.length == 0 || components[0] == null)
-			return null;
+			if (xForwardedFor != null)
+				return xForwardedFor.getHost();
+		}
 
-		String value = components[0].trim();
-		return value.length() > 0 ? value : "127.0.0.1";
+		InetSocketAddress remoteAddress = getRequest().getRemoteAddress().orElse(null);
+
+		if (remoteAddress != null) {
+			InetAddress address = remoteAddress.getAddress();
+			String host = address != null ? address.getHostAddress() : remoteAddress.getHostString();
+
+			if (host != null && !host.isBlank())
+				return host;
+		}
+
+		return null;
 	}
 
 	@Override
 	@Nullable
 	public String getRemoteHost() {
-		// This is X-Forwarded-For and is generally what we want (if present)
-		String remoteAddr = getRemoteAddr();
-
-		if (remoteAddr != null)
-			return remoteAddr;
-
-		// Path only (no query parameters) preceded by remote protocol, host, and port (if available)
-		// e.g. https://www.soklet.com/test/abc
-		String clientUrlPrefix = Utilities.extractClientUrlPrefixFromHeaders(getRequest().getHeaders()).orElse(null);
-
-		if (clientUrlPrefix != null) {
-			clientUrlPrefix = clientUrlPrefix.toLowerCase(ROOT);
-
-			// Remove protocol prefix
-			if (clientUrlPrefix.startsWith("https://"))
-				clientUrlPrefix = clientUrlPrefix.replace("https://", "");
-			else if (clientUrlPrefix.startsWith("http://"))
-				clientUrlPrefix = clientUrlPrefix.replace("http://", "");
-
-			// Remove "/" and anything after it
-			int indexOfFirstSlash = clientUrlPrefix.indexOf("/");
-
-			if (indexOfFirstSlash != -1)
-				clientUrlPrefix = clientUrlPrefix.substring(0, indexOfFirstSlash);
-
-			String[] hostAndPortComponents = clientUrlPrefix.split(":");
-
-			String host = null;
-
-			if (hostAndPortComponents != null && hostAndPortComponents.length > 0 && hostAndPortComponents[0] != null)
-				host = hostAndPortComponents[0].trim();
-
-			if (host != null && host.length() > 0)
-				return host;
-		}
-
 		// "If the engine cannot or chooses not to resolve the hostname (to improve performance),
 		// this method returns the dotted-string form of the IP address."
 		return getRemoteAddr();
@@ -918,16 +1978,16 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public Locale getLocale() {
-		List<Locale> locales = getRequest().getLocales();
+		List<@NonNull Locale> locales = getRequest().getLocales();
 		return locales.size() == 0 ? getDefault() : locales.get(0);
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<Locale> getLocales() {
-		List<Locale> locales = getRequest().getLocales();
+	@NonNull
+	public Enumeration<@NonNull Locale> getLocales() {
+		List<@NonNull Locale> locales = getRequest().getLocales();
 		return Collections.enumeration(locales.size() == 0 ? List.of(getDefault()) : locales);
 	}
 
@@ -943,48 +2003,56 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 		return null;
 	}
 
-	@Override
-	public int getRemotePort() {
-		// Not reliably knowable without a socket; return 0 to indicate "unknown"
-		return 0;
+	@Deprecated
+	@Nullable
+	public String getRealPath(String path) {
+		// "As of Version 2.1 of the Java Servlet API, use ServletContext.getRealPath(java.lang.String) instead."
+		return getServletContext().getRealPath(path);
 	}
 
 	@Override
-	@Nonnull
-	public String getLocalName() {
-		if (getHost().isPresent())
-			return getHost().get();
+	public int getRemotePort() {
+		if (shouldTrustForwardedHeaders()) {
+			ForwardedClient forwardedFor = extractForwardedClientFromHeaders();
 
-		try {
-			String hostName = InetAddress.getLocalHost().getHostName();
-
-			if (hostName != null) {
-				hostName = hostName.trim();
-
-				if (hostName.length() > 0)
-					return hostName;
+			if (forwardedFor != null) {
+				Integer port = forwardedFor.getPort();
+				return port == null ? 0 : port;
 			}
-		} catch (Exception e) {
-			// Ignored
+
+			ForwardedClient xForwardedFor = extractXForwardedClientFromHeaders();
+
+			if (xForwardedFor != null) {
+				Integer port = xForwardedFor.getPort();
+				return port == null ? 0 : port;
+			}
 		}
+
+		InetSocketAddress remoteAddress = getRequest().getRemoteAddress().orElse(null);
+		return remoteAddress == null ? 0 : remoteAddress.getPort();
+	}
+
+	@Override
+	@NonNull
+	public String getLocalName() {
+		String host = getHost().orElse(null);
+
+		if (host != null && !host.isBlank())
+			return stripIpv6Brackets(host);
 
 		return "localhost";
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getLocalAddr() {
-		try {
-			String hostAddress = InetAddress.getLocalHost().getHostAddress();
+		String host = getHost().orElse(null);
 
-			if (hostAddress != null) {
-				hostAddress = hostAddress.trim();
+		if (host != null) {
+			String normalized = stripIpv6Brackets(host).trim();
 
-				if (hostAddress.length() > 0)
-					return hostAddress;
-			}
-		} catch (Exception e) {
-			// Ignored
+			if (!normalized.isEmpty() && (isIpv4Literal(normalized) || isIpv6Literal(normalized)))
+				return normalized;
 		}
 
 		return "127.0.0.1";
@@ -992,27 +2060,27 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 
 	@Override
 	public int getLocalPort() {
-		return getPort().orElseThrow(() -> new IllegalStateException(format("%s must be initialized with a port in order to call this method",
-				getClass().getSimpleName())));
+		Integer port = getPort().orElse(null);
+		return port == null ? 0 : port;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ServletContext getServletContext() {
 		return this.servletContext;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public AsyncContext startAsync() throws IllegalStateException {
 		throw new IllegalStateException("Soklet does not support async servlet operations");
 	}
 
 	@Override
-	@Nonnull
-	public AsyncContext startAsync(@Nonnull ServletRequest servletRequest,
-																 @Nonnull ServletResponse servletResponse) throws IllegalStateException {
-		requireNonNull(servletResponse);
+	@NonNull
+	public AsyncContext startAsync(@NonNull ServletRequest servletRequest,
+																 @NonNull ServletResponse servletResponse) throws IllegalStateException {
+		requireNonNull(servletRequest);
 		requireNonNull(servletResponse);
 
 		throw new IllegalStateException("Soklet does not support async servlet operations");
@@ -1029,129 +2097,33 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public AsyncContext getAsyncContext() {
 		throw new IllegalStateException("Soklet does not support async servlet operations");
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public DispatcherType getDispatcherType() {
 		// Currently Soklet does not support RequestDispatcher, so this is safe to hardcode
 		return DispatcherType.REQUEST;
 	}
 
-	// *** Jakarta-specific below
-
-	@Nullable
-	private String requestId;
-	@Nullable
-	private ServletConnection servletConnection;
-
 	@Override
-	@Nonnull
-	public HttpServletMapping getHttpServletMapping() {
-		// Soklet does not use Servlet mappings. Return a default mapping consistent with the container's default servlet handling ("/").
-		return new HttpServletMapping() {
-			@Override
-			@Nonnull
-			public String getMatchValue() {
-				return ""; // empty for DEFAULT
-			}
-
-			@Override
-			@Nonnull
-			public String getPattern() {
-				return "/";
-			}
-
-			@Override
-			@Nonnull
-			public String getServletName() {
-				return "Soklet";
-			}
-
-			@Override
-			@Nonnull
-			public MappingMatch getMappingMatch() {
-				return MappingMatch.DEFAULT;
-			}
-		};
-	}
-
-	@Override
-	@Nonnull
-	public Map<String, String> getTrailerFields() {
-		// Soklet requests are backed by an in-memory byte array and do not support protocol trailers.
-		return Map.of();
-	}
-
-	@Override
-	public boolean isTrailerFieldsReady() {
-		// There will never be trailers to read for Soklet-backed requests.
-		return true;
-	}
-
-	@Override
-	public void setCharacterEncoding(@Nullable Charset encoding) {
-		// Prefer the new 6.1 overload. Behaves like setCharacterEncoding(String) but without checked exception.
-		setCharset(encoding);
-	}
-
-	@Override
-	@Nonnull
+	@NonNull
 	public String getRequestId() {
-		if (this.requestId == null)
-			this.requestId = UUID.randomUUID().toString();
-
 		return this.requestId;
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getProtocolRequestId() {
-		// Per Servlet 6.1 specification, for HTTP/1.x there is no protocol-defined request ID.
-		// Return the empty string in that case.
 		return "";
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ServletConnection getServletConnection() {
-		if (this.servletConnection == null) {
-			String protocol = getProtocol(); // e.g. "HTTP/1.1"
-			boolean secure = "https".equalsIgnoreCase(getScheme());
-			String alpn = protocol.toUpperCase(Locale.ROOT).startsWith("HTTP/1") ? "http/1.1" : "unknown";
-			String connectionId = UUID.randomUUID().toString();
-
-			this.servletConnection = new ServletConnection() {
-				@Override
-				@Nonnull
-				public String getConnectionId() {
-					return connectionId;
-				}
-
-				@Override
-				@Nonnull
-				public String getProtocol() {
-					return alpn;
-				}
-
-
-				@Override
-				@Nonnull
-				public String getProtocolConnectionId() {
-					// HTTP/1.x and HTTP/2 do not define a protocol connection ID per spec.
-					return "";
-				}
-
-				@Override
-				public boolean isSecure() {
-					return secure;
-				}
-			};
-		}
-
 		return this.servletConnection;
 	}
 }

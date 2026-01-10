@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,17 +23,14 @@ import jakarta.servlet.Servlet;
 import jakarta.servlet.ServletContext;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.ServletRegistration;
-import jakarta.servlet.ServletRequest;
-import jakarta.servlet.ServletResponse;
 import jakarta.servlet.SessionCookieConfig;
 import jakarta.servlet.SessionTrackingMode;
 import jakarta.servlet.descriptor.JspConfigDescriptor;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.annotation.concurrent.ThreadSafe;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
@@ -42,6 +39,7 @@ import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.net.URLConnection;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -52,10 +50,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.EventListener;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Collectors;
@@ -69,51 +68,439 @@ import static java.util.Objects.requireNonNull;
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
-@NotThreadSafe
+@ThreadSafe
 public final class SokletServletContext implements ServletContext {
-	@Nonnull
+	@NonNull
 	private final Writer logWriter;
-	@Nonnull
-	private final Map<String, Object> attributes;
-	@Nonnull
-	private int sessionTimeout;
+	@NonNull
+	private final Object logLock;
+	@NonNull
+	private final Map<@NonNull String, @NonNull Object> attributes;
 	@Nullable
-	private Charset requestCharset;
+	private final ResourceRoot resourceRoot;
+	private volatile @Nullable Integer sessionTimeout;
 	@Nullable
-	private Charset responseCharset;
+	private volatile Charset requestCharset;
+	@Nullable
+	private volatile Charset responseCharset;
 
-	@Nonnull
-	public static SokletServletContext withDefaults() {
-		return new SokletServletContext(null);
+	public static SokletServletContext fromDefaults() {
+		return builder().build();
 	}
 
-	@Nonnull
-	public static SokletServletContext withLogWriter(@Nullable Writer logWriter) {
-		return new SokletServletContext(logWriter);
+	@NonNull
+	public static Builder builder() {
+		return new Builder();
 	}
 
-	private SokletServletContext(@Nullable Writer logWriter) {
+	private SokletServletContext(@Nullable Writer logWriter,
+															 @Nullable ResourceRoot resourceRoot,
+															 @Nullable Integer sessionTimeout,
+															 @Nullable Charset requestCharset,
+															 @Nullable Charset responseCharset) {
 		this.logWriter = logWriter == null ? new NoOpWriter() : logWriter;
-		this.attributes = new HashMap<>();
-		this.sessionTimeout = -1;
-		this.requestCharset = StandardCharsets.UTF_8;
-		this.responseCharset = StandardCharsets.UTF_8;
+		this.logLock = new Object();
+		this.attributes = new ConcurrentHashMap<>();
+		this.resourceRoot = resourceRoot;
+		this.sessionTimeout = sessionTimeout;
+		this.requestCharset = requestCharset;
+		this.responseCharset = responseCharset;
 	}
 
-	@Nonnull
+	@NonNull
 	private Writer getLogWriter() {
 		return this.logWriter;
 	}
 
-	@Nonnull
-	private Map<String, Object> getAttributes() {
+	@NonNull
+	private Map<@NonNull String, @NonNull Object> getAttributes() {
 		return this.attributes;
+	}
+
+	@NonNull
+	private Optional<ResourceRoot> getResourceRoot() {
+		return Optional.ofNullable(this.resourceRoot);
+	}
+
+	/**
+	 * Builder used to construct instances of {@link SokletServletContext}.
+	 * <p>
+	 * This class is intended for use by a single thread.
+	 *
+	 * @author <a href="https://www.revetkn.com">Mark Allen</a>
+	 */
+	@NotThreadSafe
+	public static class Builder {
+		@Nullable
+		private Writer logWriter;
+		@Nullable
+		private ResourceRoot resourceRoot;
+		@Nullable
+		private Integer sessionTimeout;
+		@Nullable
+		private Charset requestCharset;
+		@Nullable
+		private Charset responseCharset;
+
+		private Builder() {
+			this.sessionTimeout = null;
+			this.requestCharset = StandardCharsets.ISO_8859_1;
+			this.responseCharset = StandardCharsets.ISO_8859_1;
+		}
+
+		@NonNull
+		public Builder logWriter(@Nullable Writer logWriter) {
+			this.logWriter = logWriter;
+			return this;
+		}
+
+		@NonNull
+		public Builder filesystemResourceRoot(@NonNull Path resourceRoot) {
+			requireNonNull(resourceRoot);
+			this.resourceRoot = ResourceRoot.forFilesystem(resourceRoot);
+			return this;
+		}
+
+		@NonNull
+		public Builder classpathResourceRoot(@NonNull String resourceRoot) {
+			requireNonNull(resourceRoot);
+			this.resourceRoot = ResourceRoot.forClasspath(resourceRoot);
+			return this;
+		}
+
+		@NonNull
+		public Builder sessionTimeout(int sessionTimeout) {
+			this.sessionTimeout = sessionTimeout;
+			return this;
+		}
+
+		@NonNull
+		public Builder requestCharacterEncoding(@Nullable Charset charset) {
+			this.requestCharset = charset;
+			return this;
+		}
+
+		@NonNull
+		public Builder responseCharacterEncoding(@Nullable Charset charset) {
+			this.responseCharset = charset;
+			return this;
+		}
+
+		@NonNull
+		public SokletServletContext build() {
+			return new SokletServletContext(
+					this.logWriter,
+					this.resourceRoot,
+					this.sessionTimeout,
+					this.requestCharset,
+					this.responseCharset);
+		}
+
+	}
+
+	@ThreadSafe
+	private interface ResourceRoot {
+		@Nullable
+		Set<@NonNull String> getResourcePaths(@NonNull String path);
+
+		@Nullable
+		URL getResource(@NonNull String path) throws MalformedURLException;
+
+		@Nullable
+		InputStream getResourceAsStream(@NonNull String path);
+
+		@NonNull
+		static ResourceRoot forFilesystem(@NonNull Path resourceRoot) {
+			return new FilesystemResourceRoot(resourceRoot);
+		}
+
+		@NonNull
+		static ResourceRoot forClasspath(@NonNull String resourceRoot) {
+			return new ClasspathResourceRoot(resourceRoot);
+		}
+	}
+
+	@ThreadSafe
+	private static final class FilesystemResourceRoot implements ResourceRoot {
+		@NonNull
+		private final Path root;
+
+		private FilesystemResourceRoot(@NonNull Path root) {
+			requireNonNull(root);
+			this.root = root.toAbsolutePath().normalize();
+		}
+
+		@NonNull
+		private Optional<Path> resolvePath(@NonNull String path) {
+			String relative = path.substring(1);
+			Path resolved = root.resolve(relative).normalize();
+			return resolved.startsWith(root) ? Optional.of(resolved) : Optional.empty();
+		}
+
+		@Override
+		@Nullable
+		public Set<@NonNull String> getResourcePaths(@NonNull String path) {
+			requireNonNull(path);
+			String normalized = path;
+
+			if (!normalized.endsWith("/"))
+				normalized += "/";
+
+			Path dir = resolvePath(normalized).orElse(null);
+
+			if (dir == null || !Files.isDirectory(dir))
+				return null;
+
+			try (Stream<Path> stream = Files.list(dir)) {
+				Set<@NonNull String> out = new java.util.TreeSet<>();
+				String prefix = normalized;
+
+				stream.forEach(child -> {
+					String name = child.getFileName().toString();
+					boolean isDir = Files.isDirectory(child);
+					out.add(prefix + name + (isDir ? "/" : ""));
+				});
+
+				return out.isEmpty() ? null : out;
+			} catch (IOException ignored) {
+				return null;
+			}
+		}
+
+		@Override
+		@Nullable
+		public URL getResource(@NonNull String path) throws MalformedURLException {
+			requireNonNull(path);
+			Path resolved = resolvePath(path).orElse(null);
+
+			if (resolved == null || !Files.exists(resolved))
+				return null;
+
+			return resolved.toUri().toURL();
+		}
+
+		@Override
+		@Nullable
+		public InputStream getResourceAsStream(@NonNull String path) {
+			try {
+				URL url = getResource(path);
+				return url == null ? null : url.openStream();
+			} catch (IOException ignored) {
+				return null;
+			}
+		}
+	}
+
+	@ThreadSafe
+	private static final class ClasspathResourceRoot implements ResourceRoot {
+		@NonNull
+		private final String rootPrefix;
+		@NonNull
+		private final ClassLoader classLoader;
+
+		private ClasspathResourceRoot(@NonNull String rootPrefix) {
+			requireNonNull(rootPrefix);
+			this.rootPrefix = normalizePrefix(rootPrefix);
+			ClassLoader loader = Thread.currentThread().getContextClassLoader();
+			this.classLoader = loader == null ? SokletServletContext.class.getClassLoader() : loader;
+		}
+
+		@NonNull
+		private static String normalizePrefix(@NonNull String prefix) {
+			String normalized = prefix.trim();
+
+			if (normalized.startsWith("/"))
+				normalized = normalized.substring(1);
+
+			if (!normalized.isEmpty() && !normalized.endsWith("/"))
+				normalized += "/";
+
+			if (containsDotDotSegment(normalized))
+				throw new IllegalArgumentException("Classpath resource root must not contain '..'");
+
+			return normalized;
+		}
+
+		private static boolean containsDotDotSegment(@NonNull String path) {
+			for (String segment : path.split("/")) {
+				if ("..".equals(segment))
+					return true;
+			}
+
+			return false;
+		}
+
+		@NonNull
+		private Optional<String> toClasspathPath(@NonNull String path,
+																						 boolean forDirectoryListing) {
+			if (containsDotDotSegment(path))
+				return Optional.empty();
+
+			String relative = path.substring(1);
+			String lookup = rootPrefix + relative;
+
+			if (forDirectoryListing && !lookup.endsWith("/") && !lookup.isEmpty())
+				lookup += "/";
+
+			return Optional.of(lookup);
+		}
+
+		private void addFilesystemEntries(@NonNull Path dir,
+																			@NonNull String prefix,
+																			@NonNull Set<@NonNull String> out) throws IOException {
+			if (!Files.isDirectory(dir))
+				return;
+
+			try (Stream<Path> stream = Files.list(dir)) {
+				stream.forEach(child -> {
+					String name = child.getFileName().toString();
+					boolean isDir = Files.isDirectory(child);
+					out.add(prefix + name + (isDir ? "/" : ""));
+				});
+			}
+		}
+
+		private void addJarEntries(@NonNull JarFile jar,
+															 @NonNull String jarPrefix,
+															 @NonNull String prefix,
+															 @NonNull Set<@NonNull String> out) {
+			jar.stream()
+					.map(JarEntry::getName)
+					.filter(name -> name.startsWith(jarPrefix) && !name.equals(jarPrefix))
+					.map(name -> {
+						String remainder = name.substring(jarPrefix.length());
+						int slash = remainder.indexOf('/');
+						if (slash == -1)
+							return prefix + remainder;
+
+						return prefix + remainder.substring(0, slash + 1);
+					})
+					.forEach(out::add);
+		}
+
+		private void addClasspathRootEntries(@NonNull URL rootUrl,
+																				 @NonNull String classpathPath,
+																				 @NonNull String prefix,
+																				 @NonNull Set<@NonNull String> out) throws Exception {
+			String protocol = rootUrl.getProtocol();
+
+			if ("file".equals(protocol)) {
+				Path rootPath = Paths.get(rootUrl.toURI());
+				if (Files.isDirectory(rootPath)) {
+					Path dir = classpathPath.isEmpty() ? rootPath : rootPath.resolve(classpathPath);
+					addFilesystemEntries(dir, prefix, out);
+				} else if (Files.isRegularFile(rootPath)) {
+					try (JarFile jar = new JarFile(rootPath.toFile())) {
+						addJarEntries(jar, classpathPath, prefix, out);
+					}
+				}
+			} else if ("jar".equals(protocol)) {
+				String spec = rootUrl.getFile();
+				int bang = spec.indexOf("!");
+				String jarPath = bang >= 0 ? spec.substring(0, bang) : spec;
+				URL jarUrl = new URL(jarPath);
+
+				try (JarFile jar = new JarFile(new java.io.File(jarUrl.toURI()))) {
+					addJarEntries(jar, classpathPath, prefix, out);
+				}
+			}
+		}
+
+		@Override
+		@Nullable
+		public Set<@NonNull String> getResourcePaths(@NonNull String path) {
+			requireNonNull(path);
+
+			String classpathPath = toClasspathPath(path, true).orElse(null);
+
+			if (classpathPath == null)
+				return null;
+
+			try {
+				Enumeration<@NonNull URL> roots = classLoader.getResources(classpathPath);
+				Set<@NonNull String> out = new java.util.TreeSet<>();
+				String prefix = path.endsWith("/") ? path : path + "/";
+				boolean sawRoot = false;
+
+				while (roots.hasMoreElements()) {
+					sawRoot = true;
+					URL url = roots.nextElement();
+					String protocol = url.getProtocol();
+
+					if ("file".equals(protocol)) {
+						Path rootPath = Paths.get(url.toURI());
+						if (Files.isDirectory(rootPath)) {
+							addFilesystemEntries(rootPath, prefix, out);
+						} else if (Files.isRegularFile(rootPath)) {
+							try (JarFile jar = new JarFile(rootPath.toFile())) {
+								addJarEntries(jar, classpathPath, prefix, out);
+							}
+						}
+					} else if ("jar".equals(protocol)) {
+						String spec = url.getFile();
+						int bang = spec.indexOf("!");
+						String jarPath = spec.substring(0, bang);
+						URL jarUrl = new URL(jarPath);
+
+						try (JarFile jar = new JarFile(new java.io.File(jarUrl.toURI()))) {
+							String jarPrefix = classpathPath;
+							addJarEntries(jar, jarPrefix, prefix, out);
+						}
+					}
+				}
+
+				if (!sawRoot) {
+					Enumeration<@NonNull URL> classpathRoots = classLoader.getResources("");
+
+					while (classpathRoots.hasMoreElements()) {
+						URL rootUrl = classpathRoots.nextElement();
+						addClasspathRootEntries(rootUrl, classpathPath, prefix, out);
+					}
+				}
+
+				if (out.isEmpty() && classLoader instanceof URLClassLoader) {
+					URL[] urls = ((URLClassLoader) classLoader).getURLs();
+
+					for (URL rootUrl : urls)
+						addClasspathRootEntries(rootUrl, classpathPath, prefix, out);
+				}
+
+				return out.isEmpty() ? null : out;
+			} catch (Exception ignored) {
+				return null;
+			}
+		}
+
+		@Override
+		@Nullable
+		public URL getResource(@NonNull String path) throws MalformedURLException {
+			requireNonNull(path);
+
+			String classpathPath = toClasspathPath(path, false).orElse(null);
+
+			if (classpathPath == null)
+				return null;
+
+			URL url = classLoader.getResource(classpathPath);
+			return url;
+		}
+
+		@Override
+		@Nullable
+		public InputStream getResourceAsStream(@NonNull String path) {
+			String classpathPath = toClasspathPath(path, false).orElse(null);
+
+			if (classpathPath == null)
+				return null;
+
+			return classLoader.getResourceAsStream(classpathPath);
+		}
 	}
 
 	@ThreadSafe
 	private static class NoOpWriter extends Writer {
 		@Override
-		public void write(@Nonnull char[] cbuf,
+		public void write(@NonNull char[] cbuf,
 											int off,
 											int len) throws IOException {
 			requireNonNull(cbuf);
@@ -142,7 +529,15 @@ public final class SokletServletContext implements ServletContext {
 	@Override
 	@Nullable
 	public ServletContext getContext(@Nullable String uripath) {
-		return this;
+		if (uripath == null)
+			return null;
+
+		String normalized = uripath.trim();
+
+		if (normalized.isEmpty() || "/".equals(normalized))
+			return this;
+
+		return null;
 	}
 
 	@Override
@@ -175,110 +570,50 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
-	public Set<String> getResourcePaths(@Nullable String path) {
-		// TODO: revisit https://javaee.github.io/javaee-spec/javadocs/javax/servlet/ServletContext.html#getResourcePaths-java.lang.String-
+	@Nullable
+	public Set<@NonNull String> getResourcePaths(@Nullable String path) {
 		if (path == null || !path.startsWith("/"))
-			return java.util.Set.of();
+			return null;
 
-		try {
-			String normalized = path.equals("/") ? "" : path.substring(1);
-
-			if (!normalized.endsWith("/") && !normalized.isEmpty())
-				normalized += "/";
-
-			Enumeration<URL> roots =
-					Thread.currentThread().getContextClassLoader().getResources(normalized);
-
-			Set<String> out = new java.util.TreeSet<>();
-
-			while (roots.hasMoreElements()) {
-				URL url = roots.nextElement();
-				String protocol = url.getProtocol();
-
-				if ("file".equals(protocol)) {
-					Path p = Paths.get(url.toURI());
-
-					try (Stream<Path> s = Files.list(p)) {
-						s.forEach(child -> {
-							String name = child.getFileName().toString();
-							boolean dir = java.nio.file.Files.isDirectory(child);
-							out.add((path.endsWith("/") ? path : path + "/") + name + (dir ? "/" : ""));
-						});
-					}
-				} else if ("jar".equals(protocol)) {
-					String spec = url.getFile();           // e.g. file:/app.jar!/static/
-					int bang = spec.indexOf("!");
-					String jarPath = spec.substring(0, bang);
-					java.net.URL jarUrl = new java.net.URL(jarPath);
-					try (JarFile jar = new JarFile(new File(jarUrl.toURI()))) {
-						String prefix = normalized;
-						jar.stream()
-								.map(JarEntry::getName)
-								.filter(n -> n.startsWith(prefix) && !n.equals(prefix))
-								.map(n -> {
-									String remainder = n.substring(prefix.length());
-									int slash = remainder.indexOf('/');
-									if (slash == -1)
-										return (path.endsWith("/") ? path : path + "/") + remainder;
-
-									return (path.endsWith("/") ? path : path + "/") + remainder.substring(0, slash + 1);
-								})
-								.forEach(out::add);
-					}
-				}
-			}
-			return out;
-		} catch (Exception ignored) {
-			return Set.of();
-		}
+		ResourceRoot root = getResourceRoot().orElse(null);
+		return root == null ? null : root.getResourcePaths(path);
 	}
 
 	@Override
 	@Nullable
 	public URL getResource(@Nullable String path) throws MalformedURLException {
-		// TODO: revisit https://javaee.github.io/javaee-spec/javadocs/javax/servlet/ServletContext.html#getResource-java.lang.String-
-		if (path == null || !path.startsWith("/"))
+		if (path == null)
 			return null;
 
-		return getClass().getResource(path); // may be null
+		if (!path.startsWith("/"))
+			throw new MalformedURLException("ServletContext resource paths must start with '/'");
+
+		ResourceRoot root = getResourceRoot().orElse(null);
+		return root == null ? null : root.getResource(path);
 	}
 
 	@Override
 	@Nullable
 	public InputStream getResourceAsStream(@Nullable String path) {
-		// TODO: revisit https://javaee.github.io/javaee-spec/javadocs/javax/servlet/ServletContext.html#getResourceAsStream-java.lang.String-
 		if (path == null || !path.startsWith("/"))
 			return null;
 
-		return getClass().getResourceAsStream(path); // may be null
+		ResourceRoot root = getResourceRoot().orElse(null);
+		return root == null ? null : root.getResourceAsStream(path);
 	}
 
 	@Override
 	@Nullable
 	public RequestDispatcher getRequestDispatcher(@Nullable String path) {
-		// TODO: revisit https://javaee.github.io/javaee-spec/javadocs/javax/servlet/ServletContext.html#getRequestDispatcher-java.lang.String-
 		if (path == null || path.isBlank())
 			return null;
 
-		return new RequestDispatcher() {
-			@Override
-			public void forward(ServletRequest servletRequest, ServletResponse servletResponse) {
-				throw new IllegalStateException("RequestDispatcher.forward is not supported by Soklet.");
-			}
-
-			@Override
-			public void include(ServletRequest servletRequest, ServletResponse servletResponse) {
-				throw new IllegalStateException("RequestDispatcher.include is not supported by Soklet.");
-			}
-		};
+		return null;
 	}
 
 	@Override
 	@Nullable
 	public RequestDispatcher getNamedDispatcher(@Nullable String name) {
-		// TODO: revisit https://javaee.github.io/javaee-spec/javadocs/javax/servlet/ServletContext.html#getNamedDispatcher-java.lang.String-
-		// This is legal according to spec, but we likely want a real instance returned
 		return null;
 	}
 
@@ -288,7 +623,9 @@ public final class SokletServletContext implements ServletContext {
 			return;
 
 		try {
-			getLogWriter().write(msg);
+			synchronized (this.logLock) {
+				getLogWriter().write(msg);
+			}
 		} catch (IOException e) {
 			throw new UncheckedIOException(e);
 		}
@@ -297,7 +634,7 @@ public final class SokletServletContext implements ServletContext {
 	@Override
 	public void log(@Nullable String message,
 									@Nullable Throwable throwable) {
-		List<String> components = new ArrayList<>(2);
+		List<@NonNull String> components = new ArrayList<>(2);
 
 		if (message != null)
 			components.add(message);
@@ -312,7 +649,9 @@ public final class SokletServletContext implements ServletContext {
 		String combinedMessage = components.stream().collect(Collectors.joining("\n"));
 
 		try {
-			getLogWriter().write(combinedMessage);
+			synchronized (this.logLock) {
+				getLogWriter().write(combinedMessage);
+			}
 		} catch (IOException e) {
 			throw new UncheckedIOException(e);
 		}
@@ -326,7 +665,7 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getServerInfo() {
 		return "Soklet/Undefined";
 	}
@@ -339,8 +678,8 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getInitParameterNames() {
+	@NonNull
+	public Enumeration<@NonNull String> getInitParameterNames() {
 		// Soklet has no concept of init parameters
 		return Collections.emptyEnumeration();
 	}
@@ -359,8 +698,8 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getAttributeNames() {
+	@NonNull
+	public Enumeration<@NonNull String> getAttributeNames() {
 		return Collections.enumeration(getAttributes().keySet());
 	}
 
@@ -378,6 +717,9 @@ public final class SokletServletContext implements ServletContext {
 
 	@Override
 	public void removeAttribute(@Nullable String name) {
+		if (name == null)
+			return;
+
 		getAttributes().remove(name);
 	}
 
@@ -389,30 +731,26 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nullable
-	public ServletRegistration.Dynamic addServlet(@Nullable String servletName,
-																								@Nullable String className) {
+	public ServletRegistration.@Nullable Dynamic addServlet(@Nullable String servletName,
+																													@Nullable String className) {
 		throw new IllegalStateException("Soklet does not support adding Servlets");
 	}
 
 	@Override
-	@Nullable
-	public ServletRegistration.Dynamic addServlet(@Nullable String servletName,
-																								@Nullable Servlet servlet) {
+	public ServletRegistration.@Nullable Dynamic addServlet(@Nullable String servletName,
+																													@Nullable Servlet servlet) {
 		throw new IllegalStateException("Soklet does not support adding Servlets");
 	}
 
 	@Override
-	@Nullable
-	public ServletRegistration.Dynamic addServlet(@Nullable String servletName,
-																								@Nullable Class<? extends Servlet> servletClass) {
+	public ServletRegistration.@Nullable Dynamic addServlet(@Nullable String servletName,
+																													@Nullable Class<? extends Servlet> servletClass) {
 		throw new IllegalStateException("Soklet does not support adding Servlets");
 	}
 
 	@Override
-	@Nullable
-	public ServletRegistration.Dynamic addJspFile(@Nullable String servletName,
-																								@Nullable String jspFile) {
+	public ServletRegistration.@Nullable Dynamic addJspFile(@Nullable String servletName,
+																													@Nullable String jspFile) {
 		throw new IllegalStateException("Soklet does not support adding JSP files");
 	}
 
@@ -430,29 +768,26 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
-	public Map<String, ? extends ServletRegistration> getServletRegistrations() {
+	@NonNull
+	public Map<@NonNull String, ? extends @NonNull ServletRegistration> getServletRegistrations() {
 		return Map.of();
 	}
 
 	@Override
-	@Nullable
-	public FilterRegistration.Dynamic addFilter(@Nullable String filterName,
-																							@Nullable String className) {
+	public FilterRegistration.@Nullable Dynamic addFilter(@Nullable String filterName,
+																												@Nullable String className) {
 		throw new IllegalStateException("Soklet does not support adding Filters");
 	}
 
 	@Override
-	@Nullable
-	public FilterRegistration.Dynamic addFilter(@Nullable String filterName,
-																							@Nullable Filter filter) {
+	public FilterRegistration.@Nullable Dynamic addFilter(@Nullable String filterName,
+																												@Nullable Filter filter) {
 		throw new IllegalStateException("Soklet does not support adding Filters");
 	}
 
 	@Override
-	@Nullable
-	public FilterRegistration.Dynamic addFilter(@Nullable String filterName,
-																							@Nullable Class<? extends Filter> filterClass) {
+	public FilterRegistration.@Nullable Dynamic addFilter(@Nullable String filterName,
+																												@Nullable Class<? extends Filter> filterClass) {
 		throw new IllegalStateException("Soklet does not support adding Filters");
 	}
 
@@ -470,8 +805,8 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
-	public Map<String, ? extends FilterRegistration> getFilterRegistrations() {
+	@NonNull
+	public Map<@NonNull String, ? extends @NonNull FilterRegistration> getFilterRegistrations() {
 		return Map.of();
 	}
 
@@ -483,19 +818,19 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	public void setSessionTrackingModes(@Nullable Set<SessionTrackingMode> sessionTrackingModes) {
+	public void setSessionTrackingModes(@Nullable Set<@NonNull SessionTrackingMode> sessionTrackingModes) {
 		throw new IllegalStateException("Soklet does not support session tracking");
 	}
 
 	@Override
-	@Nonnull
-	public Set<SessionTrackingMode> getDefaultSessionTrackingModes() {
+	@NonNull
+	public Set<@NonNull SessionTrackingMode> getDefaultSessionTrackingModes() {
 		return Set.of();
 	}
 
 	@Override
-	@Nonnull
-	public Set<SessionTrackingMode> getEffectiveSessionTrackingModes() {
+	@NonNull
+	public Set<@NonNull SessionTrackingMode> getEffectiveSessionTrackingModes() {
 		return Set.of();
 	}
 
@@ -505,7 +840,6 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nullable
 	public <T extends EventListener> void addListener(@Nullable T t) {
 		throw new IllegalStateException("Soklet does not support listeners");
 	}
@@ -529,25 +863,26 @@ public final class SokletServletContext implements ServletContext {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ClassLoader getClassLoader() {
 		return this.getClass().getClassLoader();
 	}
 
 	@Override
-	public void declareRoles(@Nullable String... strings) {
+	public void declareRoles(@Nullable String @Nullable ... strings) {
 		throw new IllegalStateException("Soklet does not support Servlet roles");
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getVirtualServerName() {
 		return "soklet";
 	}
 
 	@Override
 	public int getSessionTimeout() {
-		return this.sessionTimeout;
+		Integer timeout = this.sessionTimeout;
+		return timeout == null ? -1 : timeout;
 	}
 
 	@Override
@@ -563,7 +898,16 @@ public final class SokletServletContext implements ServletContext {
 
 	@Override
 	public void setRequestCharacterEncoding(@Nullable String encoding) {
-		this.requestCharset = encoding == null ? null : Charset.forName(encoding);
+		if (encoding == null) {
+			this.requestCharset = null;
+			return;
+		}
+
+		try {
+			this.requestCharset = Charset.forName(encoding);
+		} catch (Exception ignored) {
+			// Ignore invalid charset tokens.
+		}
 	}
 
 	@Override
@@ -574,6 +918,15 @@ public final class SokletServletContext implements ServletContext {
 
 	@Override
 	public void setResponseCharacterEncoding(@Nullable String encoding) {
-		this.responseCharset = encoding == null ? null : Charset.forName(encoding);
+		if (encoding == null) {
+			this.responseCharset = null;
+			return;
+		}
+
+		try {
+			this.responseCharset = Charset.forName(encoding);
+		} catch (Exception ignored) {
+			// Ignore invalid charset tokens.
+		}
 	}
 }

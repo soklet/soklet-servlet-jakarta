@@ -16,31 +16,27 @@
 
 package com.soklet.servlet.jakarta;
 
+import jakarta.servlet.ServletOutputStream;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.nio.charset.StandardCharsets;
 
-/**
+/*
+ * Verify that output stream readiness reflects non-blocking semantics.
+ *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class WriterStreamExclusivityTests {
+public class ServletOutputStreamReadinessTests {
 	@Test
-	public void outputThenWriterIsIllegal() throws Exception {
-		Assertions.assertThrows(IllegalStateException.class, () -> {
-			SokletHttpServletResponse response = SokletHttpServletResponse.fromRawPath("/p", SokletServletContext.fromDefaults());
-			response.getOutputStream();
-			response.getWriter();
-		});
-	}
-
-	@Test
-	public void writerThenOutputIsIllegal() throws Exception {
-		Assertions.assertThrows(IllegalStateException.class, () -> {
-			SokletHttpServletResponse response = SokletHttpServletResponse.fromRawPath("/p", SokletServletContext.fromDefaults());
-			response.getWriter();
-			response.getOutputStream();
-		});
+	public void outputStreamIsAlwaysReady() throws Exception {
+		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+		ServletOutputStream out = resp.getOutputStream();
+		Assertions.assertTrue(out.isReady());
+		out.write("ok".getBytes(StandardCharsets.ISO_8859_1));
+		out.flush();
+		Assertions.assertTrue(out.isReady());
 	}
 }

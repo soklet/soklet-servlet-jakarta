@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,6 +43,6 @@ public class AsyncAndAuthUnsupportedTests {
 	public void authenticateThrowsServletException() {
 		Request req = Request.withPath(HttpMethod.GET, "/x").build();
 		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
-		Assertions.assertThrows(ServletException.class, () -> http.authenticate(SokletHttpServletResponse.withRequestPath("/x")));
+		Assertions.assertThrows(ServletException.class, () -> http.authenticate(SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults())));
 	}
 }

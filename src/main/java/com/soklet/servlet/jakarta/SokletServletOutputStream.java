@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ package com.soklet.servlet.jakarta;
 
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.WriteListener;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -37,21 +37,29 @@ import static java.util.Objects.requireNonNull;
  */
 @NotThreadSafe
 public final class SokletServletOutputStream extends ServletOutputStream {
-	@Nonnull
+	@NonNull
 	private final OutputStream outputStream;
-	@Nonnull
-	private final BiConsumer<SokletServletOutputStream, Integer> onWriteOccurred;
-	@Nonnull
-	private final Consumer<SokletServletOutputStream> onWriteFinalized;
-	@Nonnull
+	@NonNull
+	private final BiConsumer<@NonNull SokletServletOutputStream, @NonNull Integer> onWriteOccurred;
+	@NonNull
+	private final Consumer<@NonNull SokletServletOutputStream> onWriteFinalized;
+	@NonNull
 	private Boolean writeFinalized;
+	@NonNull
+	private Boolean closed;
 
-	@Nonnull
-	public static Builder withOutputStream(@Nonnull OutputStream outputStream) {
+	@NonNull
+	public static SokletServletOutputStream fromOutputStream(@NonNull OutputStream outputStream) {
+		requireNonNull(outputStream);
+		return withOutputStream(outputStream).build();
+	}
+
+	@NonNull
+	public static Builder withOutputStream(@NonNull OutputStream outputStream) {
 		return new Builder(outputStream);
 	}
 
-	private SokletServletOutputStream(@Nonnull Builder builder) {
+	private SokletServletOutputStream(@NonNull Builder builder) {
 		requireNonNull(builder);
 		requireNonNull(builder.outputStream);
 
@@ -59,6 +67,7 @@ public final class SokletServletOutputStream extends ServletOutputStream {
 		this.onWriteOccurred = builder.onWriteOccurred != null ? builder.onWriteOccurred : (ignored1, ignored2) -> {};
 		this.onWriteFinalized = builder.onWriteFinalized != null ? builder.onWriteFinalized : (ignored) -> {};
 		this.writeFinalized = false;
+		this.closed = false;
 	}
 
 	/**
@@ -70,84 +79,114 @@ public final class SokletServletOutputStream extends ServletOutputStream {
 	 */
 	@NotThreadSafe
 	public static class Builder {
-		@Nonnull
+		@NonNull
 		private OutputStream outputStream;
 		@Nullable
-		private BiConsumer<SokletServletOutputStream, Integer> onWriteOccurred;
+		private BiConsumer<@NonNull SokletServletOutputStream, @NonNull Integer> onWriteOccurred;
 		@Nullable
-		private Consumer<SokletServletOutputStream> onWriteFinalized;
+		private Consumer<@NonNull SokletServletOutputStream> onWriteFinalized;
 
-		@Nonnull
-		private Builder(@Nonnull OutputStream outputStream) {
+		@NonNull
+		private Builder(@NonNull OutputStream outputStream) {
 			requireNonNull(outputStream);
 			this.outputStream = outputStream;
 		}
 
-		@Nonnull
-		public Builder outputStream(@Nonnull OutputStream outputStream) {
+		@NonNull
+		public Builder outputStream(@NonNull OutputStream outputStream) {
 			requireNonNull(outputStream);
 			this.outputStream = outputStream;
 			return this;
 		}
 
-		@Nonnull
-		public Builder onWriteOccurred(@Nullable BiConsumer<SokletServletOutputStream, Integer> onWriteOccurred) {
+		@NonNull
+		public Builder onWriteOccurred(@Nullable BiConsumer<@NonNull SokletServletOutputStream, @NonNull Integer> onWriteOccurred) {
 			this.onWriteOccurred = onWriteOccurred;
 			return this;
 		}
 
-		@Nonnull
-		public Builder onWriteFinalized(@Nullable Consumer<SokletServletOutputStream> onWriteFinalized) {
+		@NonNull
+		public Builder onWriteFinalized(@Nullable Consumer<@NonNull SokletServletOutputStream> onWriteFinalized) {
 			this.onWriteFinalized = onWriteFinalized;
 			return this;
 		}
 
-		@Nonnull
+		@NonNull
 		public SokletServletOutputStream build() {
 			return new SokletServletOutputStream(this);
 		}
 	}
 
-	@Nonnull
+	@NonNull
 	private OutputStream getOutputStream() {
 		return this.outputStream;
 	}
 
-	@Nonnull
-	private BiConsumer<SokletServletOutputStream, Integer> getOnWriteOccurred() {
+	@NonNull
+	private BiConsumer<@NonNull SokletServletOutputStream, @NonNull Integer> getOnWriteOccurred() {
 		return this.onWriteOccurred;
 	}
 
-	@Nonnull
-	private Consumer<SokletServletOutputStream> getOnWriteFinalized() {
+	@NonNull
+	private Consumer<@NonNull SokletServletOutputStream> getOnWriteFinalized() {
 		return this.onWriteFinalized;
 	}
 
-	@Nonnull
+	@NonNull
 	private Boolean getWriteFinalized() {
 		return this.writeFinalized;
 	}
 
-	private void setWriteFinalized(@Nonnull Boolean writeFinalized) {
+	private void setWriteFinalized(@NonNull Boolean writeFinalized) {
 		requireNonNull(writeFinalized);
 		this.writeFinalized = writeFinalized;
+	}
+
+	@NonNull
+	private Boolean getClosed() {
+		return this.closed;
+	}
+
+	private void setClosed(@NonNull Boolean closed) {
+		requireNonNull(closed);
+		this.closed = closed;
+	}
+
+	private void ensureOpen() throws IOException {
+		if (getClosed())
+			throw new IOException("Stream is closed");
 	}
 
 // Implementation of ServletOutputStream methods below:
 
 	@Override
 	public void write(int b) throws IOException {
+		ensureOpen();
 		getOutputStream().write(b);
-		getOnWriteOccurred().accept(this, b);
+		getOnWriteOccurred().accept(this, 1);
 	}
 
 	@Override
 	public boolean isReady() {
-		return !getWriteFinalized();
+		return !getClosed();
+	}
+
+	@Override
+	public void write(@NonNull byte[] b,
+										int off,
+										int len) throws IOException {
+		requireNonNull(b);
+		ensureOpen();
+		if (len == 0)
+			return;
+
+		getOutputStream().write(b, off, len);
+		getOnWriteOccurred().accept(this, len);
 	}
 
 	@Override
 	public void flush() throws IOException {
+		ensureOpen();
 		super.flush();
 		getOutputStream().flush();
 
@@ -159,17 +198,23 @@ public final class SokletServletOutputStream extends ServletOutputStream {
 
 	@Override
 	public void close() throws IOException {
-		super.close();
-		getOutputStream().close();
+		if (getClosed())
+			return;
 
-		if (!getWriteFinalized()) {
-			setWriteFinalized(true);
-			getOnWriteFinalized().accept(this);
+		try {
+			super.close();
+			getOutputStream().close();
+		} finally {
+			setClosed(true);
+			if (!getWriteFinalized()) {
+				setWriteFinalized(true);
+				getOnWriteFinalized().accept(this);
+			}
 		}
 	}
 
 	@Override
-	public void setWriteListener(@Nonnull WriteListener writeListener) {
+	public void setWriteListener(@NonNull WriteListener writeListener) {
 		requireNonNull(writeListener);
 		throw new IllegalStateException(format("%s functionality is not supported", WriteListener.class.getSimpleName()));
 	}

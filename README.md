@@ -56,20 +56,20 @@ dependencies {
 
 A normal Servlet API integration looks like the following:
 
-1. Given a Soklet [`Request`](https://javadoc.soklet.com/com/soklet/core/Request.html), create both an [`HttpServletRequest`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletRequest.html) and an [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html).
+1. Given a Soklet [`Request`](https://javadoc.soklet.com/com/soklet/Request.html), create both an [`HttpServletRequest`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletRequest.html) and an [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html).
 2. Write whatever is needed to [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html)
-3. Convert the [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html) to a Soklet [`MarshaledResponse`](https://javadoc.soklet.com/com/soklet/core/MarshaledResponse.html)
+3. Convert the [`HttpServletResponse`](https://jakarta.javadoc.soklet.com/com/soklet/servlet/jakarta/SokletHttpServletResponse.html) to a Soklet [`MarshaledResponse`](https://javadoc.soklet.com/com/soklet/MarshaledResponse.html)
 
 ```java
 @GET("/servlet-example")
 public MarshaledResponse servletExample(Request request) {
   // Create an HttpServletRequest from the Soklet Request
-  HttpServletRequest httpServletRequest = 
-    SokletHttpServletRequest.withRequest(request).build();
+  HttpServletRequest httpServletRequest =
+    SokletHttpServletRequest.fromRequest(request);
 
-  // Create an HttpServletResponse from the Soklet Request
+  // Create an HttpServletResponse from the HttpServletRequest
   SokletHttpServletResponse httpServletResponse = 
-    SokletHttpServletResponse.withRequest(request);
+    SokletHttpServletResponse.fromRequest(httpServletRequest);
 
   // Write some data to the response using Servlet APIs
   Cookie cookie = new Cookie("name", "value");

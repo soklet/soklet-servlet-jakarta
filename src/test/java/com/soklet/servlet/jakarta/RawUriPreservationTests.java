@@ -28,43 +28,36 @@ import java.util.Map;
 import java.util.Set;
 
 /*
- * Verify absolute URL building from Host and X-Forwarded-Proto headers.
+ * Verify raw URI encoding is preserved for request URL/URI accessors.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class XForwardedAndHostUrlTests {
+public class RawUriPreservationTests {
 	@Test
-	public void buildsAbsoluteUrlFromForwardedProtoAndHost() {
-		Request req = Request.withRawUrl(HttpMethod.GET, "/path?q=1")
-				.headers(Map.of(
-						"Host", Set.of("www.soklet.com:8443"),
-						"X-Forwarded-Proto", Set.of("https")
-				))
-				.build();
-
+	public void requestUriPreservesRawEncoding() {
+		Request req = Request.withRawUrl(HttpMethod.GET, "/a%20b%3Fc?x=1").build();
 		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
 				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
 				.build();
-
-		StringBuffer url = http.getRequestURL();
-		Assertions.assertTrue(url.toString().startsWith("https://www.soklet.com:8443/path"));
-		Assertions.assertEquals("/path", http.getRequestURI());
-		Assertions.assertEquals("q=1", http.getQueryString());
+		Assertions.assertEquals("/a%20b%3Fc", http.getRequestURI());
+		Assertions.assertTrue(http.getRequestURL().toString().endsWith("/a%20b%3Fc"));
 	}
 
 	@Test
-	public void forwardedProtoIsIgnoredWithoutTrust() {
-		Request req = Request.withRawUrl(HttpMethod.GET, "/path?q=1")
+	public void requestUrlPreservesRawEncoding() {
+		Request req = Request.withRawUrl(HttpMethod.GET, "/a%20b%3Fc?x=1")
 				.headers(Map.of(
-						"Host", Set.of("www.soklet.com:8443"),
+						"Host", Set.of("example.com"),
 						"X-Forwarded-Proto", Set.of("https")
 				))
 				.build();
-
-		HttpServletRequest http = SokletHttpServletRequest.withRequest(req).build();
-
-		StringBuffer url = http.getRequestURL();
-		Assertions.assertTrue(url.toString().startsWith("http://www.soklet.com:8443/path"));
+		HttpServletRequest http = SokletHttpServletRequest.withRequest(req)
+				.forwardedHeaderTrustPolicy(TrustPolicy.TRUST_ALL)
+				.build();
+		String url = http.getRequestURL().toString();
+		Assertions.assertTrue(url.startsWith("https://example.com/"));
+		Assertions.assertTrue(url.contains("/a%20b%3Fc"));
+		Assertions.assertFalse(url.contains("?x=1"));
 	}
 }

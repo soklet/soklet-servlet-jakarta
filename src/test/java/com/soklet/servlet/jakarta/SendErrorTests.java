@@ -21,45 +21,41 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
-import java.util.Set;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 /*
- * Verify setHeader vs addHeader semantics and date header formatting.
+ * Verify sendError emits a default body.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class ResponseHeaderSetAddTests {
+public class SendErrorTests {
 	@Test
-	public void setHeaderReplacesValues() throws Exception {
+	public void sendErrorUsesReasonPhraseWhenMessageMissing() throws Exception {
 		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
-		resp.setHeader("X-Alpha", "one");
-		resp.setHeader("X-Alpha", "two"); // replaces
-
+		resp.sendError(404);
 		MarshaledResponse mr = resp.toMarshaledResponse();
-		Set<String> values = mr.getHeaders().get("X-Alpha");
-		Assertions.assertEquals(Set.of("two"), values);
+
+		Assertions.assertArrayEquals("Not Found".getBytes(StandardCharsets.ISO_8859_1),
+				mr.getBody().orElse(new byte[]{}));
+
+		String contentType = mr.getHeaders().get("Content-Type").iterator().next();
+		Assertions.assertTrue(contentType.toLowerCase(Locale.ROOT).contains("text/plain"));
+		Assertions.assertTrue(contentType.toLowerCase(Locale.ROOT).contains("charset=iso-8859-1"));
 	}
 
 	@Test
-	public void addHeaderAppendsValues() throws Exception {
+	public void sendErrorUsesProvidedMessage() throws Exception {
 		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
-		resp.addHeader("X-Beta", "one");
-		resp.addHeader("X-Beta", "two");
-
+		resp.sendError(400, "Bad Request");
 		MarshaledResponse mr = resp.toMarshaledResponse();
-		Set<String> values = mr.getHeaders().get("X-Beta");
-		Assertions.assertEquals(Set.of("one", "two"), values);
-	}
 
-	@Test
-	public void setDateHeaderFormatsAsRfc1123() throws Exception {
-		SokletHttpServletResponse resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
-		resp.setDateHeader("Date", 1_725_000_000_000L);
-		MarshaledResponse mr = resp.toMarshaledResponse();
-		String header = mr.getHeaders().get("Date").iterator().next();
-		// Should look like "EEE, dd MMM yyyy HH:mm:ss GMT"
-		Assertions.assertTrue(header.endsWith(" GMT"));
-		Assertions.assertEquals(29, header.length());
+		Assertions.assertArrayEquals("Bad Request".getBytes(StandardCharsets.ISO_8859_1),
+				mr.getBody().orElse(new byte[]{}));
+
+		String contentType = mr.getHeaders().get("Content-Type").iterator().next();
+		Assertions.assertTrue(contentType.toLowerCase(Locale.ROOT).contains("text/plain"));
+		Assertions.assertTrue(contentType.toLowerCase(Locale.ROOT).contains("charset=iso-8859-1"));
 	}
 }

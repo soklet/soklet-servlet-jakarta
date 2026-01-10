@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Revetware LLC.
+ * Copyright 2024-2026 Revetware LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,18 +20,18 @@ import jakarta.servlet.ServletContext;
 import jakarta.servlet.http.HttpSession;
 import jakarta.servlet.http.HttpSessionBindingEvent;
 import jakarta.servlet.http.HttpSessionBindingListener;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.NotThreadSafe;
+import javax.annotation.concurrent.ThreadSafe;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.Enumeration;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static java.util.Objects.requireNonNull;
 
@@ -40,57 +40,67 @@ import static java.util.Objects.requireNonNull;
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
-@NotThreadSafe
+@ThreadSafe
 public final class SokletHttpSession implements HttpSession {
-	@Nonnull
-	private UUID sessionId;
-	@Nonnull
+	@NonNull
+	private volatile UUID sessionId;
+	@NonNull
 	private final Instant createdAt;
-	@Nonnull
-	private final Map<String, Object> attributes;
-	@Nonnull
+	@NonNull
+	private volatile Instant lastAccessedAt;
+	@NonNull
+	private final Map<@NonNull String, @NonNull Object> attributes;
+	@NonNull
 	private final ServletContext servletContext;
-	private boolean invalidated;
-	private int maxInactiveInterval;
+	private volatile boolean invalidated;
+	private volatile int maxInactiveInterval;
+	private volatile boolean isNew;
 
-	@Nonnull
-	public static SokletHttpSession withServletContext(@Nonnull ServletContext servletContext) {
+	@NonNull
+	public static SokletHttpSession fromServletContext(@NonNull ServletContext servletContext) {
 		requireNonNull(servletContext);
 		return new SokletHttpSession(servletContext);
 	}
 
-	private SokletHttpSession(@Nonnull ServletContext servletContext) {
+	private SokletHttpSession(@NonNull ServletContext servletContext) {
 		requireNonNull(servletContext);
 
 		this.sessionId = UUID.randomUUID();
 		this.createdAt = Instant.now();
-		this.attributes = new HashMap<>();
+		this.lastAccessedAt = this.createdAt;
+		this.attributes = new ConcurrentHashMap<>();
 		this.servletContext = servletContext;
 		this.invalidated = false;
 		this.maxInactiveInterval = 0;
+		this.isNew = true;
 	}
 
-	public void setSessionId(@Nonnull UUID sessionId) {
+	public void setSessionId(@NonNull UUID sessionId) {
 		requireNonNull(sessionId);
 		this.sessionId = sessionId;
 	}
 
-	@Nonnull
+	@NonNull
 	private UUID getSessionId() {
 		return this.sessionId;
 	}
 
-	@Nonnull
+	@NonNull
 	private Instant getCreatedAt() {
 		return this.createdAt;
 	}
 
-	@Nonnull
-	private Map<String, Object> getAttributes() {
+	@NonNull
+	private Instant getLastAccessedAt() {
+		return this.lastAccessedAt;
+	}
+
+	@NonNull
+	private Map<@NonNull String, @NonNull Object> getAttributes() {
 		return this.attributes;
 	}
 
-	private boolean isInvalidated() {
+	boolean isInvalidated() {
 		return this.invalidated;
 	}
 
@@ -103,6 +113,14 @@ public final class SokletHttpSession implements HttpSession {
 			throw new IllegalStateException("Session is invalidated");
 	}
 
+	void markAccessed() {
+		this.lastAccessedAt = Instant.now();
+	}
+
+	void markNotNew() {
+		this.isNew = false;
+	}
+
 	// Implementation of HttpSession methods below:
 
 	@Override
@@ -112,30 +130,34 @@ public final class SokletHttpSession implements HttpSession {
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public String getId() {
+		ensureNotInvalidated();
 		return getSessionId().toString();
 	}
 
 	@Override
 	public long getLastAccessedTime() {
 		ensureNotInvalidated();
-		return getCreatedAt().toEpochMilli();
+		return getLastAccessedAt().toEpochMilli();
 	}
 
 	@Override
-	@Nonnull
+	@NonNull
 	public ServletContext getServletContext() {
+		ensureNotInvalidated();
 		return this.servletContext;
 	}
 
 	@Override
 	public void setMaxInactiveInterval(int interval) {
+		ensureNotInvalidated();
 		this.maxInactiveInterval = interval;
 	}
 
 	@Override
 	public int getMaxInactiveInterval() {
+		ensureNotInvalidated();
 		return this.maxInactiveInterval;
 	}
 
@@ -147,14 +169,14 @@ public final class SokletHttpSession implements HttpSession {
 	}
 
 	@Override
-	@Nonnull
-	public Enumeration<String> getAttributeNames() {
+	@NonNull
+	public Enumeration<@NonNull String> getAttributeNames() {
 		ensureNotInvalidated();
 		return Collections.enumeration(getAttributes().keySet());
 	}
 
 	@Override
-	public void setAttribute(@Nonnull String name,
+	public void setAttribute(@NonNull String name,
 													 @Nullable Object value) {
 		requireNonNull(name);
 
@@ -176,7 +198,7 @@ public final class SokletHttpSession implements HttpSession {
 	}
 
 	@Override
-	public void removeAttribute(@Nonnull String name) {
+	public void removeAttribute(@NonNull String name) {
 		requireNonNull(name);
 
 		ensureNotInvalidated();
@@ -191,8 +213,9 @@ public final class SokletHttpSession implements HttpSession {
 
 	@Override
 	public void invalidate() {
+		ensureNotInvalidated();
 		// Copy to prevent modification while iterating
-		Set<String> namesToRemove = new HashSet<>(getAttributes().keySet());
+		Set<@NonNull String> namesToRemove = new HashSet<>(getAttributes().keySet());
 
 		for (String name : namesToRemove)
 			removeAttribute(name);
@@ -202,6 +225,7 @@ public final class SokletHttpSession implements HttpSession {
 
 	@Override
 	public boolean isNew() {
-		return true;
+		ensureNotInvalidated();
+		return this.isNew;
 	}
 }

@@ -16,48 +16,44 @@
 
 package com.soklet.servlet.jakarta;
 
-import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.ServletOutputStream;
-import jakarta.servlet.WriteListener;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 
 /*
- * Tests for unsupported async IO features on servlet streams.
+ * Stream close semantics for servlet input/output streams.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
  */
 @ThreadSafe
-public class ServletInputOutputUnsupportedTests {
+public class StreamCloseBehaviorTests {
 	@Test
-	public void setReadListenerThrows() {
-		ServletInputStream in = SokletServletInputStream.fromInputStream(new ByteArrayInputStream(new byte[]{}));
-		Assertions.assertThrows(IllegalStateException.class, () -> in.setReadListener(new ReadListener() {
-			@Override
-			public void onDataAvailable() {}
+	public void inputStreamReadAfterCloseThrows() throws Exception {
+		ServletInputStream inputStream = SokletServletInputStream.fromInputStream(new ByteArrayInputStream(new byte[]{1, 2}));
+		inputStream.close();
 
-			@Override
-			public void onAllDataRead() {}
-
-			@Override
-			public void onError(Throwable t) {}
-		}));
+		Assertions.assertThrows(IOException.class, inputStream::read);
 	}
 
 	@Test
-	public void setWriteListenerThrows() {
-		ServletOutputStream out = SokletServletOutputStream.withOutputStream(new ByteArrayOutputStream()).build();
-		Assertions.assertThrows(IllegalStateException.class, () -> out.setWriteListener(new WriteListener() {
-			@Override
-			public void onWritePossible() {}
+	public void outputStreamWriteAfterCloseThrows() throws Exception {
+		ServletOutputStream outputStream = SokletServletOutputStream.withOutputStream(new ByteArrayOutputStream()).build();
+		outputStream.close();
 
-			@Override
-			public void onError(Throwable t) {}
-		}));
+		Assertions.assertThrows(IOException.class, () -> outputStream.write(1));
+	}
+
+	@Test
+	public void outputStreamFlushAfterCloseThrows() throws Exception {
+		ServletOutputStream outputStream = SokletServletOutputStream.withOutputStream(new ByteArrayOutputStream()).build();
+		outputStream.close();
+
+		Assertions.assertThrows(IOException.class, outputStream::flush);
 	}
 }

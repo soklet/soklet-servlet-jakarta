@@ -21,7 +21,7 @@ import com.soklet.MarshaledResponse;
 import com.soklet.Request;
 import com.soklet.Response;
 import com.soklet.ResponseCookie;
-import com.soklet.Utilities.EffectiveOriginResolver.TrustPolicy;
+import com.soklet.EffectiveOriginResolver.TrustPolicy;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;

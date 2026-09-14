@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import javax.annotation.concurrent.ThreadSafe;
+import java.io.UnsupportedEncodingException;
 import java.nio.charset.Charset;
 import java.util.Locale;
 
@@ -118,30 +119,19 @@ public class CharacterEncodingWriterTests {
 	}
 
 	@Test
-	public void invalidSetCharacterEncodingIsIgnored() throws Exception {
+	public void invalidSetCharacterEncodingFailsAtWriterAcquisition() {
 		var resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.setCharacterEncoding("no-such-charset");
-		resp.getWriter().write("é");
-		MarshaledResponse mr = resp.toMarshaledResponse();
-
-		Assertions.assertArrayEquals("é".getBytes(Charset.forName("ISO-8859-1")),
-				bodyBytesOrEmpty(mr));
+		Assertions.assertEquals("no-such-charset", resp.getCharacterEncoding());
+		Assertions.assertThrows(UnsupportedEncodingException.class, resp::getWriter);
 	}
 
 	@Test
-	public void invalidCharsetInContentTypeIsIgnored() throws Exception {
+	public void invalidCharsetInContentTypeFailsAtWriterAcquisition() {
 		var resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.setContentType("text/plain; charset=no-such-charset");
-		resp.getWriter().write("ok");
-		MarshaledResponse mr = resp.toMarshaledResponse();
-
-		String encoding = resp.getCharacterEncoding();
-		Assertions.assertArrayEquals("ok".getBytes(Charset.forName(encoding)),
-				bodyBytesOrEmpty(mr));
-
-		var ct = mr.getHeaders().get("Content-Type").iterator().next();
-		Assertions.assertTrue(ct.toLowerCase(Locale.ROOT).contains("charset=iso-8859-1"),
-				"Content-Type header does not include ISO-8859-1");
+		Assertions.assertEquals("no-such-charset", resp.getCharacterEncoding());
+		Assertions.assertThrows(UnsupportedEncodingException.class, resp::getWriter);
 	}
 
 	@Test

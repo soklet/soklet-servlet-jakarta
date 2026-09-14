@@ -34,6 +34,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.UnsupportedEncodingException;
+import java.io.Writer;
 import java.net.IDN;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -48,7 +50,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -112,6 +113,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Nullable
 	private Charset charset;
 	@Nullable
+	private String unsupportedCharsetName;
+	@Nullable
 	private String contentType;
 	@NonNull
 	private Integer responseBufferSizeInBytes;
@@ -119,6 +122,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	private SokletServletOutputStream servletOutputStream;
 	@Nullable
 	private SokletServletPrintWriter printWriter;
+	@Nullable
+	private ResettableResponseWriter responseWriter;
 
 	@NonNull
 	public static SokletHttpServletResponse fromRequest(@NonNull HttpServletRequest request) {
@@ -178,20 +183,39 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		this.responseFinalized = false;
 	}
 
+	/**
+	 * Converts the captured response to Soklet's application response representation.
+	 * Empty buffers are represented as an absent body for {@code 204} and {@code 304}.
+	 * Nonempty bodies are preserved for Soklet's normal response validation.
+	 * Cookies with Servlet extension attributes are preserved as {@code Set-Cookie}
+	 * headers; ordinary cookies remain in {@link Response#getCookies()}.
+	 *
+	 * @return the captured application response
+	 */
 	@NonNull
 	public Response toResponse() {
 		MarshaledResponse marshaledResponse = toMarshaledResponse();
 
 		return Response.withStatusCode(marshaledResponse.getStatusCode())
-				.body(getResponseOutputStream().toByteArray())
+				.body(getResponseBody())
 				.headers(marshaledResponse.getHeaders())
 				.cookies(marshaledResponse.getCookies())
 				.build();
 	}
 
+	/**
+	 * Converts the captured response to Soklet's marshaled response representation.
+	 * Empty buffers are represented as an absent body for {@code 204} and {@code 304}.
+	 * Nonempty bodies are preserved for Soklet's normal response validation.
+	 * Cookies with Servlet extension attributes are preserved as {@code Set-Cookie}
+	 * headers, including attributes not modeled by {@link ResponseCookie}; ordinary
+	 * cookies remain in {@link MarshaledResponse#getCookies()}.
+	 *
+	 * @return the captured marshaled response
+	 */
 	@NonNull
 	public MarshaledResponse toMarshaledResponse() {
-		byte[] body = getResponseOutputStream().toByteArray();
+		byte @Nullable [] body = getResponseBody();
 
 		Map<@NonNull String, @NonNull Set<@NonNull String>> headers = getHeaders().entrySet().stream()
 				.collect(Collectors.toMap(
@@ -201,29 +225,29 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 							left.addAll(right);
 							return left;
 						},
-						LinkedHashMap::new
+						() -> new TreeMap<>(String.CASE_INSENSITIVE_ORDER)
 				));
 
-		Set<@NonNull ResponseCookie> cookies = getCookies().stream()
-				.map(cookie -> {
-					ResponseCookie.Builder builder = ResponseCookie.with(cookie.getName(), cookie.getValue())
-							.path(cookie.getPath())
-							.secure(cookie.getSecure())
-							.httpOnly(cookie.isHttpOnly())
-							.domain(cookie.getDomain());
-
-					if (cookie.getMaxAge() >= 0)
-						builder.maxAge(Duration.ofSeconds(cookie.getMaxAge()));
-
-					return builder.build();
-				})
-				.collect(Collectors.toSet());
+		Set<@NonNull ResponseCookie> cookies = new LinkedHashSet<>();
+		for (Cookie cookie : getCookies()) {
+			if (cookie.getAttributes().keySet().stream().anyMatch(name -> !isStandardCookieAttribute(name)))
+				headers.computeIfAbsent("Set-Cookie", ignored -> new LinkedHashSet<>()).add(toSetCookieHeaderValue(cookie));
+			else
+				cookies.add(toResponseCookie(cookie));
+		}
 
 		return MarshaledResponse.withStatusCode(getStatus())
 				.body(body)
 				.headers(headers)
 				.cookies(cookies)
 				.build();
+	}
+
+	private byte @Nullable [] getResponseBody() {
+		byte[] body = getResponseOutputStream().toByteArray();
+		// Servlet buffers exist even when no content was written. Only normalize
+		// supported bodyless final statuses; preserve empty ordinary responses.
+		return body.length == 0 && (getStatus() == SC_NO_CONTENT || getStatus() == SC_NOT_MODIFIED) ? null : body;
 	}
 
 	@NonNull
@@ -268,6 +292,46 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	private String toSetCookieHeaderValue(@NonNull Cookie cookie) {
 		requireNonNull(cookie);
 
+		StringBuilder value = new StringBuilder(toResponseCookie(cookie).toSetCookieHeaderRepresentation());
+		for (Map.Entry<String, String> attribute : cookie.getAttributes().entrySet()) {
+			if (isStandardCookieAttribute(attribute.getKey()))
+				continue;
+			validateCookieAttribute(attribute.getKey(), attribute.getValue());
+			value.append("; ").append(attribute.getKey());
+			if (!attribute.getValue().isEmpty())
+				value.append('=').append(attribute.getValue());
+		}
+		return value.toString();
+	}
+
+	private boolean isStandardCookieAttribute(@NonNull String name) {
+		requireNonNull(name);
+		return "Domain".equalsIgnoreCase(name) || "Path".equalsIgnoreCase(name)
+				|| "Max-Age".equalsIgnoreCase(name) || "Secure".equalsIgnoreCase(name)
+				|| "HttpOnly".equalsIgnoreCase(name);
+	}
+
+	private void validateCookieAttribute(@NonNull String name, @NonNull String value) {
+		requireNonNull(name);
+		requireNonNull(value);
+		if (name.isEmpty())
+			throw new IllegalArgumentException("Cookie attribute name must not be empty");
+		for (int i = 0; i < name.length(); i++) {
+			char character = name.charAt(i);
+			if (!((character >= '0' && character <= '9') || (character >= 'a' && character <= 'z')
+					|| (character >= 'A' && character <= 'Z') || "!#$%&'*+-.^_`|~".indexOf(character) >= 0))
+				throw new IllegalArgumentException("Cookie attribute name must be an HTTP token");
+		}
+		for (int i = 0; i < value.length(); i++) {
+			char character = value.charAt(i);
+			if (character < 0x20 || character == 0x7F || character > 0xFF || character == ';')
+				throw new IllegalArgumentException("Cookie attribute value contains an invalid character");
+		}
+	}
+
+	@NonNull
+	private ResponseCookie toResponseCookie(@NonNull Cookie cookie) {
+		requireNonNull(cookie);
 		ResponseCookie.Builder builder = ResponseCookie.with(cookie.getName(), cookie.getValue())
 				.path(cookie.getPath())
 				.secure(cookie.getSecure())
@@ -277,7 +341,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (cookie.getMaxAge() >= 0)
 			builder.maxAge(Duration.ofSeconds(cookie.getMaxAge()));
 
-		return builder.build().toSetCookieHeaderRepresentation();
+		return builder.build();
 	}
 
 	private void putHeaderValue(@NonNull String name,
@@ -355,6 +419,17 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 	private void setCharset(@Nullable Charset charset) {
 		this.charset = charset;
+		this.unsupportedCharsetName = null;
+	}
+
+	private void setCharsetName(@NonNull String name) {
+		requireNonNull(name);
+		try {
+			setCharset(Charset.forName(name));
+		} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+			this.charset = null;
+			this.unsupportedCharsetName = name;
+		}
 	}
 
 	@NonNull
@@ -396,10 +471,18 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		byte[] bytes = payload.getBytes(charset);
 		getResponseOutputStream().write(bytes, 0, bytes.length);
 
-		String currentContentType = getContentType();
+		// Error messages may contain request-derived markup. Always describe these
+		// generated bytes as plain text, never as the discarded representation.
+		setContentType("text/plain; charset=" + charset.name());
+	}
 
-		if (currentContentType == null || currentContentType.isBlank())
-			setContentType("text/plain; charset=" + charset.name());
+	private void clearDiscardedRepresentationHeaders() {
+		for (String name : List.of("Content-Type", "Content-Length", "Content-Encoding",
+				"Content-Range", "Content-Language", "Content-Location", "Content-Disposition", "Content-MD5",
+				"Transfer-Encoding", "Trailer",
+				"Content-Digest", "Repr-Digest", "Digest", "ETag", "Last-Modified", "Accept-Ranges"))
+			getHeaders().remove(name);
+		this.contentType = null;
 	}
 
 	private void maybeCommitOnWrite() {
@@ -511,6 +594,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 												@Nullable String msg) throws IOException {
 		ensureResponseIsUncommitted();
 		resetBuffer();
+		clearDiscardedRepresentationHeaders();
 		setStatus(sc);
 		setErrorMessage(msg);
 		writeDefaultErrorBody(sc, msg);
@@ -521,6 +605,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	public void sendError(int sc) throws IOException {
 		ensureResponseIsUncommitted();
 		resetBuffer();
+		clearDiscardedRepresentationHeaders();
 		setStatus(sc);
 		setErrorMessage(null);
 		writeDefaultErrorBody(sc, null);
@@ -548,7 +633,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (host != null && host.indexOf(':') >= 0 && !host.startsWith("[") && !host.endsWith("]"))
 			authorityHost = "[" + host + "]";
 
-		String authority = defaultPort ? authorityHost : format("%s:%d", authorityHost, port);
+		String authority = defaultPort ? authorityHost : authorityHost + ":" + port;
 		validateAuthority(scheme, authority);
 		return format("%s://%s", scheme, authority);
 	}
@@ -967,17 +1052,9 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (length == 0)
 			return;
 
-		int end = length;
-
-		if (end > 0 && output.charAt(end - 1) == '/')
-			end--;
-
-		if (end <= 0) {
-			output.setLength(0);
-			return;
-		}
-
-		int lastSlash = output.lastIndexOf("/", end - 1);
+		// A trailing slash introduces an empty segment. Remove that segment,
+		// not the preceding nonempty segment (RFC 3986 section 5.2.4).
+		int lastSlash = output.lastIndexOf("/");
 
 		if (lastSlash >= 0)
 			output.delete(lastSlash, output.length());
@@ -1043,8 +1120,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 		setStatus(sc);
 
-		if (clearBuffer)
+		if (clearBuffer) {
 			resetBuffer();
+			clearDiscardedRepresentationHeaders();
+		}
 
 		// This method can accept relative URLs; the servlet container must convert the relative URL to an absolute URL
 		// before sending the response to the client. If the location is relative without a leading '/' the container
@@ -1130,9 +1209,16 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (isCommitted())
 			return;
 
-		if (name != null && !name.isBlank() && value != null) {
+		if (name != null && !name.isBlank()) {
 			if ("Content-Type".equalsIgnoreCase(name)) {
 				setContentType(value);
+				return;
+			}
+
+			if (value == null) {
+				getHeaders().remove(name);
+				if ("Set-Cookie".equalsIgnoreCase(name))
+					getCookies().clear();
 				return;
 			}
 
@@ -1242,7 +1328,12 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Override
 	@NonNull
 	public String getCharacterEncoding() {
-		return getEffectiveCharset().name();
+		if (this.unsupportedCharsetName != null)
+			return this.unsupportedCharsetName;
+		if (this.charset != null)
+			return this.charset.name();
+		String contextEncoding = getServletContext().getResponseCharacterEncoding();
+		return contextEncoding == null ? DEFAULT_CHARSET.name() : contextEncoding;
 	}
 
 	@Override
@@ -1353,7 +1444,14 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 		if (currentResponseWriteMethod == ResponseWriteMethod.UNSPECIFIED) {
 			// Freeze encoding now
-			Charset enc = getEffectiveCharset();
+			Charset enc;
+			try {
+				enc = Charset.forName(getCharacterEncoding());
+			} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+				UnsupportedEncodingException failure = new UnsupportedEncodingException(getCharacterEncoding());
+				failure.initCause(e);
+				throw failure;
+			}
 			setCharset(enc); // record the chosen encoding explicitly
 
 			// If a content type is already present and lacks charset, append the frozen charset to header
@@ -1376,9 +1474,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 			setResponseWriteMethod(ResponseWriteMethod.PRINT_WRITER);
 
+			this.responseWriter = new ResettableResponseWriter(getResponseOutputStream(), enc);
 			this.printWriter =
 					SokletServletPrintWriter.withWriter(
-									new OutputStreamWriter(getResponseOutputStream(), enc))
+									this.responseWriter)
 							.onWriteOccurred((ignored1, ignored2) -> maybeCommitOnWrite())
 							.onWriteFinalized((ignored) -> {
 								setResponseCommitted(true);
@@ -1404,7 +1503,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (writerObtained())
 			return;
 
-		if (charset == null || charset.isBlank()) {
+		if (charset == null) {
 			// Clear explicit charset; default will be chosen at writer time if needed
 			setCharset(null);
 
@@ -1424,20 +1523,15 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 			return;
 		}
 
-		Charset cs;
-
-		try {
-			cs = Charset.forName(charset);
-		} catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
-			return;
-		}
-		setCharset(cs);
+		// Servlet 6.1 preserves unsupported names so getWriter can report them;
+		// callers may still write encoded bytes through getOutputStream.
+		setCharsetName(charset);
 
 		// If a Content-Type is set, reflect/replace the charset=... in the header
 		String currentContentType = getContentType();
 
 		if (currentContentType != null) {
-			String updated = withCharset(currentContentType, cs.name()).orElse(null);
+			String updated = withCharset(currentContentType, getCharacterEncoding()).orElse(null);
 
 			if (updated != null) {
 				this.contentType = updated;
@@ -1480,23 +1574,20 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 			if (type == null || type.isBlank()) {
 				getHeaders().remove("Content-Type");
+				setCharset(null);
 				return;
 			}
 
 			// If caller specified charset=..., adopt it as the current explicit charset
 			Optional<String> cs = extractCharsetFromContentType(type);
 			if (cs.isPresent()) {
-				try {
-					setCharset(Charset.forName(cs.get()));
-				} catch (IllegalCharsetNameException | UnsupportedCharsetException ignored) {
-					// Ignore invalid charset token; leave current charset unchanged.
-				}
+				setCharsetName(cs.get());
 				putHeaderValue("Content-Type", type, true);
 			} else {
 				// No charset in type. If an explicit charset already exists (via setCharacterEncoding),
 				// reflect it in the header; otherwise just set the type as-is.
-				if (getCharset().isPresent()) {
-					String updated = withCharset(type, getCharset().get().name()).orElse(null);
+				if (getCharset().isPresent() || this.unsupportedCharsetName != null) {
+					String updated = withCharset(type, getCharacterEncoding()).orElse(null);
 
 					if (updated != null) {
 						this.contentType = updated;
@@ -1574,6 +1665,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Override
 	public void resetBuffer() {
 		ensureResponseIsUncommitted();
+		if (this.responseWriter != null)
+			this.responseWriter.resetEncoder();
 		getResponseOutputStream().reset();
 	}
 
@@ -1596,6 +1689,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		setStatusCode(HttpServletResponse.SC_OK);
 		setServletOutputStream(null);
 		setPrintWriter(null);
+		this.responseWriter = null;
 		setResponseWriteMethod(ResponseWriteMethod.UNSPECIFIED);
 		setResponseOutputStream(new ByteArrayOutputStream(getResponseBufferSizeInBytes()));
 		getHeaders().clear();
@@ -1616,7 +1710,7 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 
 		this.locale = locale;
 
-		if (locale != null && !writerObtained() && getCharset().isEmpty()) {
+		if (locale != null && !writerObtained() && getCharset().isEmpty() && this.unsupportedCharsetName == null) {
 			Charset contextCharset = getContextResponseCharset();
 			Charset selectedCharset = contextCharset == null ? DEFAULT_CHARSET : contextCharset;
 			setCharacterEncoding(selectedCharset.name());
@@ -1638,5 +1732,45 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	@Override
 	public Locale getLocale() {
 		return this.locale == null ? Locale.getDefault() : this.locale;
+	}
+
+	/**
+	 * Keeps the acquired PrintWriter stable while discarding encoder state along
+	 * with resetBuffer's bytes (shift state, BOM state, and pending surrogates).
+	 */
+	private static final class ResettableResponseWriter extends Writer {
+		@NonNull
+		private final ByteArrayOutputStream output;
+		@NonNull
+		private final Charset charset;
+		@NonNull
+		private OutputStreamWriter delegate;
+
+		private ResettableResponseWriter(@NonNull ByteArrayOutputStream output, @NonNull Charset charset) {
+			this.output = requireNonNull(output);
+			this.charset = requireNonNull(charset);
+			this.delegate = new OutputStreamWriter(output, charset);
+		}
+
+		private void resetEncoder() {
+			// Do not flush/close the discarded encoder: that would reintroduce
+			// pending content into the freshly reset response.
+			this.delegate = new OutputStreamWriter(this.output, this.charset);
+		}
+
+		@Override
+		public void write(char @NonNull [] chars, int offset, int length) throws IOException {
+			this.delegate.write(chars, offset, length);
+		}
+
+		@Override
+		public void flush() throws IOException {
+			this.delegate.flush();
+		}
+
+		@Override
+		public void close() throws IOException {
+			this.delegate.close();
+		}
 	}
 }

@@ -25,11 +25,10 @@ import org.jspecify.annotations.Nullable;
 
 import javax.annotation.concurrent.ThreadSafe;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,6 +43,8 @@ import static java.util.Objects.requireNonNull;
 public final class SokletHttpSession implements HttpSession {
 	@NonNull
 	private volatile UUID sessionId;
+	@NonNull
+	private final Object stateLock;
 	@NonNull
 	private final Instant createdAt;
 	@NonNull
@@ -66,6 +67,7 @@ public final class SokletHttpSession implements HttpSession {
 		requireNonNull(servletContext);
 
 		this.sessionId = UUID.randomUUID();
+		this.stateLock = new Object();
 		this.createdAt = Instant.now();
 		this.lastAccessedAt = this.createdAt;
 		this.attributes = new ConcurrentHashMap<>();
@@ -77,7 +79,10 @@ public final class SokletHttpSession implements HttpSession {
 
 	public void setSessionId(@NonNull UUID sessionId) {
 		requireNonNull(sessionId);
-		this.sessionId = sessionId;
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			this.sessionId = sessionId;
+		}
 	}
 
 	@NonNull
@@ -104,21 +109,23 @@ public final class SokletHttpSession implements HttpSession {
 		return this.invalidated;
 	}
 
-	private void setInvalidated(boolean invalidated) {
-		this.invalidated = invalidated;
-	}
-
 	private void ensureNotInvalidated() {
 		if (isInvalidated())
 			throw new IllegalStateException("Session is invalidated");
 	}
 
 	void markAccessed() {
-		this.lastAccessedAt = Instant.now();
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			this.lastAccessedAt = Instant.now();
+		}
 	}
 
 	void markNotNew() {
-		this.isNew = false;
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			this.isNew = false;
+		}
 	}
 
 	// Implementation of HttpSession methods below:
@@ -151,8 +158,10 @@ public final class SokletHttpSession implements HttpSession {
 
 	@Override
 	public void setMaxInactiveInterval(int interval) {
-		ensureNotInvalidated();
-		this.maxInactiveInterval = interval;
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			this.maxInactiveInterval = interval;
+		}
 	}
 
 	@Override
@@ -164,15 +173,19 @@ public final class SokletHttpSession implements HttpSession {
 	@Override
 	@Nullable
 	public Object getAttribute(@Nullable String name) {
-		ensureNotInvalidated();
-		return getAttributes().get(name);
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			return getAttributes().get(name);
+		}
 	}
 
 	@Override
 	@NonNull
 	public Enumeration<@NonNull String> getAttributeNames() {
-		ensureNotInvalidated();
-		return Collections.enumeration(getAttributes().keySet());
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			return Collections.enumeration(new ArrayList<>(getAttributes().keySet()));
+		}
 	}
 
 	@Override
@@ -180,47 +193,104 @@ public final class SokletHttpSession implements HttpSession {
 													 @Nullable Object value) {
 		requireNonNull(name);
 
-		ensureNotInvalidated();
-
 		if (value == null) {
 			removeAttribute(name);
-		} else {
-			Object existingValue = getAttributes().get(name);
-
-			if (existingValue != null && existingValue instanceof HttpSessionBindingListener)
-				((HttpSessionBindingListener) existingValue).valueUnbound(new HttpSessionBindingEvent(this, name, existingValue));
-
-			getAttributes().put(name, value);
-
-			if (value instanceof HttpSessionBindingListener)
-				((HttpSessionBindingListener) value).valueBound(new HttpSessionBindingEvent(this, name, value));
+			return;
 		}
+
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			if (getAttributes().get(name) == value)
+				return;
+		}
+
+		// Servlet binding notifications precede publication. Application callbacks run
+		// outside the state lock and may reenter or invalidate this session.
+		Throwable failure = notifyBindingListener(name, value, true, null);
+		Object existingValue = null;
+		boolean published;
+		synchronized (this.stateLock) {
+			published = !this.invalidated;
+			if (published)
+				existingValue = getAttributes().put(name, value);
+		}
+
+		if (published) {
+			// The replaced object is no longer visible before it is notified.
+			if (existingValue != value)
+				failure = notifyBindingListener(name, existingValue, false, failure);
+		} else {
+			// Balance the pre-bind notification without resurrecting an invalidated session.
+			failure = notifyBindingListener(name, value, false, failure);
+			IllegalStateException invalidatedFailure = new IllegalStateException("Session is invalidated");
+			if (failure == null)
+				failure = invalidatedFailure;
+			else
+				failure.addSuppressed(invalidatedFailure);
+		}
+
+		rethrowListenerFailure(failure);
 	}
 
 	@Override
 	public void removeAttribute(@NonNull String name) {
 		requireNonNull(name);
 
-		ensureNotInvalidated();
+		Object existingValue;
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			existingValue = getAttributes().remove(name);
+		}
 
-		Object existingValue = getAttributes().get(name);
-
-		if (existingValue != null && existingValue instanceof HttpSessionBindingListener)
-			((HttpSessionBindingListener) existingValue).valueUnbound(new HttpSessionBindingEvent(this, name, existingValue));
-
-		getAttributes().remove(name);
+		rethrowListenerFailure(notifyBindingListener(name, existingValue, false, null));
 	}
 
 	@Override
 	public void invalidate() {
-		ensureNotInvalidated();
-		// Copy to prevent modification while iterating
-		Set<@NonNull String> namesToRemove = new HashSet<>(getAttributes().keySet());
+		Map<@NonNull String, @NonNull Object> removedAttributes;
+		synchronized (this.stateLock) {
+			ensureNotInvalidated();
+			removedAttributes = Map.copyOf(getAttributes());
+			getAttributes().clear();
+			this.invalidated = true;
+		}
 
-		for (String name : namesToRemove)
-			removeAttribute(name);
+		Throwable failure = null;
+		for (Map.Entry<@NonNull String, @NonNull Object> entry : removedAttributes.entrySet())
+			failure = notifyBindingListener(entry.getKey(), entry.getValue(), false, failure);
 
-		setInvalidated(true);
+		rethrowListenerFailure(failure);
+	}
+
+	@Nullable
+	private Throwable notifyBindingListener(@NonNull String name,
+																			 @Nullable Object value,
+																			 boolean bound,
+																			 @Nullable Throwable failure) {
+		if (!(value instanceof HttpSessionBindingListener))
+			return failure;
+
+		try {
+			HttpSessionBindingEvent event = new HttpSessionBindingEvent(this, name, value);
+			if (bound)
+				((HttpSessionBindingListener) value).valueBound(event);
+			else
+				((HttpSessionBindingListener) value).valueUnbound(event);
+		} catch (RuntimeException | Error e) {
+			if (failure == null)
+				return e;
+			if (failure != e)
+				failure.addSuppressed(e);
+		}
+
+		return failure;
+	}
+
+	private void rethrowListenerFailure(@Nullable Throwable failure) {
+		if (failure instanceof RuntimeException)
+			throw (RuntimeException) failure;
+		if (failure instanceof Error)
+			throw (Error) failure;
 	}
 
 	@Override

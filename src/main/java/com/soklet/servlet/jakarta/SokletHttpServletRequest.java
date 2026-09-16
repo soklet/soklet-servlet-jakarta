@@ -259,7 +259,12 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 						continue;
 
 					String cookieValue = unquoteCookieValueIfNeeded(rawValue);
-					convertedCookies.add(new Cookie(rawName, cookieValue));
+					try {
+						convertedCookies.add(new Cookie(rawName, cookieValue));
+					} catch (IllegalArgumentException ignored) {
+						// An unrepresentable client cookie must not discard its valid neighbors.
+						// In particular, Servlet 4.0 reserves some otherwise valid cookie names.
+					}
 				}
 			}
 		}
@@ -538,7 +543,8 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	private Map<@NonNull String, @NonNull List<@NonNull String>> parseParameters() {
 		Map<@NonNull String, @NonNull List<@NonNull String>> parsed = new LinkedHashMap<>();
 		Charset charset = getEffectiveCharset();
-		appendParameters(parsed, getRequest().getRawQuery().orElse(""), charset);
+		// URL query components use core's UTF-8 contract, independently of body encoding.
+		appendParameters(parsed, getRequest().getRawQuery().orElse(""), StandardCharsets.UTF_8);
 
 		// All parameter-family entry points populate the same snapshot, even when a queried
 		// name occurs only in the URL. Only eligible POST form bodies are consumed.
@@ -1112,7 +1118,7 @@ public final class SokletHttpServletRequest implements HttpServletRequest {
 	 * @author <a href="https://www.revetkn.com">Mark Allen</a>
 	 */
 	@NotThreadSafe
-	public static class Builder {
+	public static final class Builder {
 		@NonNull
 		private Request request;
 		@Nullable

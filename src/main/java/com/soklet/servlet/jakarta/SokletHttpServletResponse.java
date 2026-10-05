@@ -217,10 +217,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	public MarshaledResponse toMarshaledResponse() {
 		byte @Nullable [] body = getResponseBody();
 
-		Map<@NonNull String, @NonNull Set<@NonNull String>> headers = getHeaders().entrySet().stream()
+		Map<@NonNull String, @NonNull List<@NonNull String>> headers = getHeaders().entrySet().stream()
 				.collect(Collectors.toMap(
 						Map.Entry::getKey,
-						entry -> new LinkedHashSet<>(entry.getValue()),
+						entry -> new ArrayList<>(entry.getValue()),
 						(left, right) -> {
 							left.addAll(right);
 							return left;
@@ -228,10 +228,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 						() -> new TreeMap<>(String.CASE_INSENSITIVE_ORDER)
 				));
 
-		Set<@NonNull ResponseCookie> cookies = new LinkedHashSet<>();
+		List<@NonNull ResponseCookie> cookies = new ArrayList<>();
 		for (Cookie cookie : getCookies()) {
 			if (cookie.getAttributes().keySet().stream().anyMatch(name -> !isStandardCookieAttribute(name)))
-				headers.computeIfAbsent("Set-Cookie", ignored -> new LinkedHashSet<>()).add(toSetCookieHeaderValue(cookie));
+				headers.computeIfAbsent("Set-Cookie", ignored -> new ArrayList<>()).add(toSetCookieHeaderValue(cookie));
 			else
 				cookies.add(toResponseCookie(cookie));
 		}

@@ -116,6 +116,10 @@ dependencies {
   Completed listener failures propagate to the owner and followers that observe
   completion before returning. Listener reentry does not wait. Binding
   listeners should avoid waiting for work or locks a concurrent setter may hold.
+- Raw `Set-Cookie` headers and cookies added with `addCookie` preserve their
+  occurrence order. `setHeader("Set-Cookie", value)` replaces both forms.
+  Cookies preceding a later raw header are represented as header values during
+  conversion; trailing ordinary cookies remain structured response cookies.
 - Generated error responses use safe plain text and replace stale representation
   metadata. Redirects that clear the body also remove the previous representation's
   metadata. Cookies and unrelated application headers are preserved.
@@ -128,10 +132,11 @@ acquiring the writer also clears an explicitly selected charset. An unsupported
 charset specified in Content-Type fails at writer acquisition.
 
 Jakarta cookie extensions such as `SameSite`, `Partitioned`, `Priority`, and
-custom attributes are preserved. Cookies using extensions are emitted as
-validated raw `Set-Cookie` headers in both response conversions; ordinary cookies
-remain in Soklet's typed cookie collection. When inspecting converted cookies,
-consider both the headers and the typed collection.
+custom attributes are preserved. Cookies using extensions and any preceding
+cookies are emitted as validated raw `Set-Cookie` headers in both response
+conversions. Trailing ordinary cookies remain in Soklet's typed cookie collection,
+so occurrence order is preserved. When inspecting converted cookies, consider
+both the headers and the typed collection.
 
 These are interoperability adapters, not full servlet containers; unsupported
 container features are not implicitly enabled by these corrections.

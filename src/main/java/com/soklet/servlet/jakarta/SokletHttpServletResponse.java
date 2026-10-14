@@ -205,8 +205,9 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	 * <p>
 	 * This method copies the captured body into a finite response. It does not transmit bytes or
 	 * create a native streaming body; memory use includes the capture and conversion copies.
-	 * Cookies with Servlet extension attributes are preserved as {@code Set-Cookie}
-	 * headers; ordinary cookies remain in {@link Response#getCookies()}.
+	 * Cookies with Servlet extension attributes and any preceding cookies are preserved as
+	 * {@code Set-Cookie} headers. Trailing ordinary cookies remain in {@link Response#getCookies()},
+	 * preserving cookie occurrence order.
 	 *
 	 * @return the captured application response
 	 */
@@ -228,9 +229,10 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	 * <p>
 	 * This method copies the captured body into a finite response. It does not transmit bytes or
 	 * create a native streaming body; memory use includes the capture and conversion copies.
-	 * Cookies with Servlet extension attributes are preserved as {@code Set-Cookie}
-	 * headers, including attributes not modeled by {@link ResponseCookie}; ordinary
-	 * cookies remain in {@link MarshaledResponse#getCookies()}.
+	 * Cookies with Servlet extension attributes and any preceding cookies are preserved as
+	 * {@code Set-Cookie} headers, including attributes not modeled by {@link ResponseCookie}.
+	 * Trailing ordinary cookies remain in {@link MarshaledResponse#getCookies()}, preserving
+	 * cookie occurrence order.
 	 *
 	 * @return the captured marshaled response
 	 */
@@ -249,9 +251,17 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 						() -> new TreeMap<>(String.CASE_INSENSITIVE_ORDER)
 				));
 
+		// Preserve occurrence order across ordinary and extension cookies. Only
+		// the trailing ordinary cookies can remain after the raw header prefix.
+		int lastExtendedCookie = -1;
+		for (int index = 0; index < getCookies().size(); index++)
+			if (getCookies().get(index).getAttributes().keySet().stream()
+					.anyMatch(name -> !isStandardCookieAttribute(name)))
+				lastExtendedCookie = index;
 		List<@NonNull ResponseCookie> cookies = new ArrayList<>();
-		for (Cookie cookie : getCookies()) {
-			if (cookie.getAttributes().keySet().stream().anyMatch(name -> !isStandardCookieAttribute(name)))
+		for (int index = 0; index < getCookies().size(); index++) {
+			Cookie cookie = getCookies().get(index);
+			if (index <= lastExtendedCookie)
 				headers.computeIfAbsent("Set-Cookie", ignored -> new ArrayList<>()).add(toSetCookieHeaderValue(cookie));
 			else
 				cookies.add(toResponseCookie(cookie));
@@ -375,6 +385,9 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 															boolean replace) {
 		requireNonNull(name);
 		requireNonNull(value);
+
+		if ("Set-Cookie".equalsIgnoreCase(name))
+			name = "Set-Cookie";
 
 		if (replace) {
 			List<@NonNull String> values = new ArrayList<>();
@@ -1251,6 +1264,8 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 				return;
 			}
 
+			if ("Set-Cookie".equalsIgnoreCase(name))
+				getCookies().clear();
 			putHeaderValue(name, value, true);
 		}
 	}
@@ -1267,6 +1282,13 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 				return;
 			}
 
+			if ("Set-Cookie".equalsIgnoreCase(name)) {
+				// Raw headers are emitted before structured cookies. Move the earlier
+				// cookies into that prefix before appending this later header value.
+				for (String cookieValue : getSetCookieHeaderValues())
+					putHeaderValue("Set-Cookie", cookieValue, false);
+				getCookies().clear();
+			}
 			putHeaderValue(name, value, false);
 		}
 	}
@@ -1404,22 +1426,59 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 	}
 
 	@NonNull
+	private List<@NonNull String> contentTypeParts(@NonNull String type) {
+		List<@NonNull String> parts = new ArrayList<>();
+		boolean quoted = false;
+		boolean escaped = false;
+		int start = 0;
+
+		for (int i = 0; i < type.length(); i++) {
+			char ch = type.charAt(i);
+			if (escaped) {
+				escaped = false;
+			} else if (quoted && ch == '\\') {
+				escaped = true;
+			} else if (ch == '"') {
+				quoted = !quoted;
+			} else if (!quoted && ch == ';') {
+				parts.add(type.substring(start, i).trim());
+				start = i + 1;
+			}
+		}
+
+		parts.add(type.substring(start).trim());
+		return parts;
+	}
+
+	private boolean isCharsetParameter(@NonNull String parameter) {
+		int equals = parameter.indexOf('=');
+		return equals >= 0 && "charset".equalsIgnoreCase(parameter.substring(0, equals).trim());
+	}
+
+	@NonNull
 	private Optional<String> extractCharsetFromContentType(@Nullable String type) {
 		if (type == null)
 			return Optional.empty();
 
-		String[] parts = type.split(";");
+		List<@NonNull String> parts = contentTypeParts(type);
 
-		for (int i = 1; i < parts.length; i++) {
-			String p = parts[i].trim();
-			if (p.toLowerCase(Locale.ROOT).startsWith("charset=")) {
-				String cs = p.substring("charset=".length()).trim();
+		for (int i = 1; i < parts.size(); i++) {
+			String parameter = parts.get(i);
+			if (!isCharsetParameter(parameter))
+				continue;
 
-				if (cs.startsWith("\"") && cs.endsWith("\"") && cs.length() >= 2)
-					cs = cs.substring(1, cs.length() - 1);
-
-				return Optional.of(cs);
+			String charset = parameter.substring(parameter.indexOf('=') + 1).trim();
+			if (charset.length() >= 2 && charset.startsWith("\"") && charset.endsWith("\"")) {
+				StringBuilder decoded = new StringBuilder();
+				for (int j = 1; j < charset.length() - 1; j++) {
+					char ch = charset.charAt(j);
+					if (ch == '\\' && j + 1 < charset.length() - 1)
+						ch = charset.charAt(++j);
+					decoded.append(ch);
+				}
+				charset = decoded.toString();
 			}
+			return Optional.of(charset);
 		}
 
 		return Optional.empty();
@@ -1431,18 +1490,17 @@ public final class SokletHttpServletResponse implements HttpServletResponse {
 		if (type == null)
 			return Optional.empty();
 
-		String[] parts = type.split(";");
-		String base = parts[0].trim();
+		List<@NonNull String> parts = contentTypeParts(type);
+		String base = parts.getFirst();
 		List<@NonNull String> kept = new ArrayList<>();
 
-		for (int i = 1; i < parts.length; i++) {
-			String p = parts[i].trim();
-
-			if (!p.toLowerCase(Locale.ROOT).startsWith("charset=") && !p.isEmpty())
-				kept.add(p);
+		for (int i = 1; i < parts.size(); i++) {
+			String parameter = parts.get(i);
+			if (!isCharsetParameter(parameter) && !parameter.isEmpty())
+				kept.add(parameter);
 		}
 
-		return Optional.ofNullable(kept.isEmpty() ? base : base + "; " + String.join("; ", kept));
+		return Optional.of(kept.isEmpty() ? base : base + "; " + String.join("; ", kept));
 	}
 
 	// Helper: ensure Content-Type includes the given charset (replacing any existing one)

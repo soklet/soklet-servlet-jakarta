@@ -211,4 +211,24 @@ public class JakartaResponseContractTests {
 		assertTrue(response.toMarshaledResponse().getHeaders().isEmpty());
 		assertTrue(response.toMarshaledResponse().getCookies().isEmpty());
 	}
+	@Test
+	public void extendedCookiesDoNotMoveAheadOfEarlierOrdinaryCookies() {
+		var response = response();
+		response.addCookie(new Cookie("same", "first"));
+		Cookie extended = new Cookie("same", "second");
+		extended.setAttribute("SameSite", "Strict");
+		response.addCookie(extended);
+		response.addCookie(new Cookie("same", "third"));
+		var expected = new ArrayList<>(response.getHeaders("Set-Cookie"));
+		var marshaled = response.toMarshaledResponse();
+		var actual = new ArrayList<String>();
+		marshaled.getHeaders().entrySet().stream()
+				.filter(entry -> entry.getKey().equalsIgnoreCase("Set-Cookie"))
+				.forEach(entry -> actual.addAll(entry.getValue()));
+		marshaled.getCookies().forEach(cookie -> actual.add(cookie.toSetCookieHeaderRepresentation()));
+		assertEquals(expected, actual);
+		assertEquals(marshaled.getHeaders(), response.toResponse().getHeaders());
+		assertEquals(marshaled.getCookies(), response.toResponse().getCookies());
+	}
+
 }

@@ -36,6 +36,22 @@ import static com.soklet.servlet.jakarta.MarshaledResponseTestSupport.bodyBytesO
 @ThreadSafe
 public class CharacterEncodingWriterTests {
 	@Test
+	public void blankCharsetClearsExplicitAndUnsupportedEncoding() throws Exception {
+		for (String blank : new String[]{"", " \t"}) {
+			var response = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
+			response.setContentType("text/plain; note=preserved; charset=UTF-8");
+			response.setCharacterEncoding("no-such-charset");
+			response.setCharacterEncoding(blank);
+			Assertions.assertEquals("text/plain; note=preserved", response.getContentType());
+			Assertions.assertEquals("ISO-8859-1", response.getCharacterEncoding());
+			response.getWriter().write("é");
+			Assertions.assertEquals("text/plain; note=preserved; charset=ISO-8859-1", response.getContentType());
+			Assertions.assertArrayEquals("é".getBytes(Charset.forName("ISO-8859-1")),
+					bodyBytesOrEmpty(response.toMarshaledResponse()));
+		}
+	}
+
+	@Test
 	public void quotedContentTypeParametersDoNotOverrideTheCharset() throws Exception {
 		var resp = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
 		resp.setContentType("text/plain; note=\"a;charset=bogus\"; charset=UTF-8");

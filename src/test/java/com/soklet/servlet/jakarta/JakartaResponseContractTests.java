@@ -97,7 +97,7 @@ public class JakartaResponseContractTests {
 
 	@Test
 	public void unknownAndInvalidCharsetNamesFailWriterWithoutLockingIt() throws Exception {
-		for (String encoding : List.of("no-such-charset", "bad charset", "")) {
+		for (String encoding : List.of("no-such-charset", "bad charset")) {
 			var response = response();
 			response.setContentType("text/plain");
 			response.setCharacterEncoding(encoding);

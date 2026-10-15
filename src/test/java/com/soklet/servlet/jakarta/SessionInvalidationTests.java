@@ -33,6 +33,15 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public class SessionInvalidationTests {
 	@Test
+	public void nullAttributeNameIsAbsentUntilSessionInvalidation() {
+		HttpSession session = SokletHttpServletRequest.withRequest(Request.fromPath(HttpMethod.GET, "/x"))
+				.build().getSession(true);
+		Assertions.assertNull(session.getAttribute(null));
+		session.invalidate();
+		Assertions.assertThrows(IllegalStateException.class, () -> session.getAttribute(null));
+	}
+
+	@Test
 	public void invalidatePreventsAccess() {
 		HttpServletRequest http = SokletHttpServletRequest.withRequest(Request.withPath(HttpMethod.GET, "/x").build()).build();
 		HttpSession session = http.getSession(true);

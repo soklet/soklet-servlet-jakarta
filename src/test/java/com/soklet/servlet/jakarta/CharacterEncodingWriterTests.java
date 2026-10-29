@@ -36,6 +36,32 @@ import static com.soklet.servlet.jakarta.MarshaledResponseTestSupport.bodyBytesO
 @ThreadSafe
 public class CharacterEncodingWriterTests {
 	@Test
+	public void acquiringWriterAfterCommitPreservesTheCommittedContentType() throws Exception {
+		var context = SokletServletContext.fromDefaults();
+		context.setResponseCharacterEncoding("UTF-8");
+		var response = SokletHttpServletResponse.fromRawPath("/x", context);
+		response.setContentType("text/plain; note=preserved");
+		response.flushBuffer();
+		String committedContentType = response.getContentType();
+		response.getWriter().write("\u00e9");
+		Assertions.assertEquals(committedContentType, response.getContentType());
+		Assertions.assertEquals(committedContentType, response.toMarshaledResponse().getHeaders().get("Content-Type").getFirst());
+		Assertions.assertArrayEquals("\u00e9".getBytes(Charset.forName("UTF-8")), bodyBytesOrEmpty(response.toMarshaledResponse()));
+	}
+
+	@Test
+	public void commitmentFreezesTheContextEncodingBeforeWriterAcquisition() throws Exception {
+		var context = SokletServletContext.fromDefaults();
+		context.setResponseCharacterEncoding("ISO-8859-1");
+		var response = SokletHttpServletResponse.fromRawPath("/x", context);
+		response.flushBuffer();
+		context.setResponseCharacterEncoding("UTF-8");
+		Assertions.assertEquals("ISO-8859-1", response.getCharacterEncoding());
+		response.getWriter().write("\u00e9");
+		Assertions.assertArrayEquals("\u00e9".getBytes(Charset.forName("ISO-8859-1")), bodyBytesOrEmpty(response.toMarshaledResponse()));
+	}
+
+	@Test
 	public void blankCharsetClearsExplicitAndUnsupportedEncoding() throws Exception {
 		for (String blank : new String[]{"", " \t"}) {
 			var response = SokletHttpServletResponse.fromRawPath("/x", SokletServletContext.fromDefaults());
